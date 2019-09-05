@@ -1,6 +1,8 @@
 package warn
 
 import (
+	"fmt"
+	"github.com/bazelbuild/buildtools/tables"
 	"testing"
 )
 
@@ -118,18 +120,18 @@ def impl(ctx):
 	ctx.foobar(foo, bar)
 `,
 		[]string{
-			`:2: "ctx.new_file" is deprecated.`,
-			`:3: "ctx.new_file" is deprecated.`,
-			`:4: "ctx.new_file" is deprecated.`,
-			`:5: "ctx.new_file" is deprecated.`,
-			`:6: "ctx.experimental_new_directory" is deprecated.`,
-			`:7: "ctx.file_action" is deprecated.`,
-			`:8: "ctx.file_action" is deprecated.`,
-			`:9: "ctx.action" is deprecated.`,
-			`:10: "ctx.action" is deprecated.`,
-			`:11: "ctx.empty_action" is deprecated.`,
-			`:12: "ctx.template_action" is deprecated.`,
-			`:13: "ctx.template_action" is deprecated.`,
+			`:2: "ctx.new_file" is deprecated in favor of "ctx.actions.declare_file".`,
+			`:3: "ctx.new_file" is deprecated in favor of "ctx.actions.declare_file".`,
+			`:4: "ctx.new_file" is deprecated in favor of "ctx.actions.declare_file".`,
+			`:5: "ctx.new_file" is deprecated in favor of "ctx.actions.declare_file".`,
+			`:6: "ctx.experimental_new_directory" is deprecated in favor of "ctx.actions.declare_directory".`,
+			`:7: "ctx.file_action" is deprecated in favor of "ctx.actions.write".`,
+			`:8: "ctx.file_action" is deprecated in favor of "ctx.actions.write".`,
+			`:9: "ctx.action" is deprecated in favor of "ctx.actions.run_shell".`,
+			`:10: "ctx.action" is deprecated in favor of "ctx.actions.run".`,
+			`:11: "ctx.empty_action" is deprecated in favor of "ctx.actions.do_nothing".`,
+			`:12: "ctx.template_action" is deprecated in favor of "ctx.actions.expand_template".`,
+			`:13: "ctx.template_action" is deprecated in favor of "ctx.actions.expand_template".`,
 		},
 		scopeBzl)
 
@@ -137,7 +139,7 @@ def impl(ctx):
 def impl(ctx):
   ctx.new_file(foo, bar, baz)
 `, []string{
-		`:2: "ctx.new_file" is deprecated.`,
+		`:2: "ctx.new_file" is deprecated in favor of "ctx.actions.declare_file".`,
 	}, scopeBzl)
 }
 
@@ -456,4 +458,333 @@ rule(
 rule()  # no parameters
 rule(foo = bar)  # no matching parameters
 `, []string{}, scopeBzl)
+}
+
+func TestNativeAndroidWarning(t *testing.T) {
+	checkFindingsAndFix(t, "native-android", `
+"""My file"""
+
+def macro():
+    aar_import()
+    android_library()
+    native.android_library()
+    native.android_local_test()
+
+android_binary()
+`, fmt.Sprintf(`
+"""My file"""
+
+load(%q, "aar_import", "android_binary", "android_library", "android_local_test")
+
+def macro():
+    aar_import()
+    android_library()
+    android_library()
+    android_local_test()
+
+android_binary()
+`, tables.AndroidLoadPath),
+		[]string{
+			fmt.Sprintf(`:4: Function "aar_import" is not global anymore and needs to be loaded from "%s".`, tables.AndroidLoadPath),
+			fmt.Sprintf(`:5: Function "android_library" is not global anymore and needs to be loaded from "%s".`, tables.AndroidLoadPath),
+			fmt.Sprintf(`:6: Function "android_library" is not global anymore and needs to be loaded from "%s".`, tables.AndroidLoadPath),
+			fmt.Sprintf(`:7: Function "android_local_test" is not global anymore and needs to be loaded from "%s".`, tables.AndroidLoadPath),
+			fmt.Sprintf(`:9: Function "android_binary" is not global anymore and needs to be loaded from "%s".`, tables.AndroidLoadPath),
+		},
+		scopeBzl|scopeBuild)
+}
+
+func TestNativeCcWarning(t *testing.T) {
+	checkFindingsAndFix(t, "native-cc", `
+"""My file"""
+
+def macro():
+    cc_library()
+    native.cc_binary()
+    cc_test()
+    cc_proto_library()
+    native.fdo_prefetch_hints()
+    native.objc_library()
+    objc_import()
+    cc_toolchain()
+    native.cc_toolchain_suite()
+
+fdo_profile()
+cc_import()
+`, fmt.Sprintf(`
+"""My file"""
+
+load(%q, "cc_binary", "cc_import", "cc_library", "cc_proto_library", "cc_test", "cc_toolchain", "cc_toolchain_suite", "fdo_prefetch_hints", "fdo_profile", "objc_import", "objc_library")
+
+def macro():
+    cc_library()
+    cc_binary()
+    cc_test()
+    cc_proto_library()
+    fdo_prefetch_hints()
+    objc_library()
+    objc_import()
+    cc_toolchain()
+    cc_toolchain_suite()
+
+fdo_profile()
+cc_import()
+`, tables.CcLoadPath),
+		[]string{
+			fmt.Sprintf(`:4: Function "cc_library" is not global anymore and needs to be loaded from "%s".`, tables.CcLoadPath),
+			fmt.Sprintf(`:5: Function "cc_binary" is not global anymore and needs to be loaded from "%s".`, tables.CcLoadPath),
+			fmt.Sprintf(`:6: Function "cc_test" is not global anymore and needs to be loaded from "%s".`, tables.CcLoadPath),
+			fmt.Sprintf(`:7: Function "cc_proto_library" is not global anymore and needs to be loaded from "%s".`, tables.CcLoadPath),
+			fmt.Sprintf(`:8: Function "fdo_prefetch_hints" is not global anymore and needs to be loaded from "%s".`, tables.CcLoadPath),
+			fmt.Sprintf(`:9: Function "objc_library" is not global anymore and needs to be loaded from "%s".`, tables.CcLoadPath),
+			fmt.Sprintf(`:10: Function "objc_import" is not global anymore and needs to be loaded from "%s".`, tables.CcLoadPath),
+			fmt.Sprintf(`:11: Function "cc_toolchain" is not global anymore and needs to be loaded from "%s".`, tables.CcLoadPath),
+			fmt.Sprintf(`:12: Function "cc_toolchain_suite" is not global anymore and needs to be loaded from "%s".`, tables.CcLoadPath),
+			fmt.Sprintf(`:14: Function "fdo_profile" is not global anymore and needs to be loaded from "%s".`, tables.CcLoadPath),
+			fmt.Sprintf(`:15: Function "cc_import" is not global anymore and needs to be loaded from "%s".`, tables.CcLoadPath),
+		},
+		scopeBzl|scopeBuild)
+}
+
+func TestNativeJavaWarning(t *testing.T) {
+	checkFindingsAndFix(t, "native-java", `
+"""My file"""
+
+def macro():
+    java_import()
+    java_library()
+    native.java_library()
+    native.java_binary()
+
+java_test()
+`, fmt.Sprintf(`
+"""My file"""
+
+load(%q, "java_binary", "java_import", "java_library", "java_test")
+
+def macro():
+    java_import()
+    java_library()
+    java_library()
+    java_binary()
+
+java_test()
+`, tables.JavaLoadPath),
+		[]string{
+			fmt.Sprintf(`:4: Function "java_import" is not global anymore and needs to be loaded from "%s".`, tables.JavaLoadPath),
+			fmt.Sprintf(`:5: Function "java_library" is not global anymore and needs to be loaded from "%s".`, tables.JavaLoadPath),
+			fmt.Sprintf(`:6: Function "java_library" is not global anymore and needs to be loaded from "%s".`, tables.JavaLoadPath),
+			fmt.Sprintf(`:7: Function "java_binary" is not global anymore and needs to be loaded from "%s".`, tables.JavaLoadPath),
+			fmt.Sprintf(`:9: Function "java_test" is not global anymore and needs to be loaded from "%s".`, tables.JavaLoadPath),
+		},
+		scopeBzl|scopeBuild)
+}
+
+func TestNativePyWarning(t *testing.T) {
+	checkFindingsAndFix(t, "native-py", `
+"""My file"""
+
+def macro():
+    py_library()
+    py_binary()
+    native.py_test()
+    native.py_runtime()
+
+py_test()
+`, fmt.Sprintf(`
+"""My file"""
+
+load(%q, "py_binary", "py_library", "py_runtime", "py_test")
+
+def macro():
+    py_library()
+    py_binary()
+    py_test()
+    py_runtime()
+
+py_test()
+`, tables.PyLoadPath),
+		[]string{
+			fmt.Sprintf(`:4: Function "py_library" is not global anymore and needs to be loaded from "%s".`, tables.PyLoadPath),
+			fmt.Sprintf(`:5: Function "py_binary" is not global anymore and needs to be loaded from "%s".`, tables.PyLoadPath),
+			fmt.Sprintf(`:6: Function "py_test" is not global anymore and needs to be loaded from "%s".`, tables.PyLoadPath),
+			fmt.Sprintf(`:7: Function "py_runtime" is not global anymore and needs to be loaded from "%s".`, tables.PyLoadPath),
+			fmt.Sprintf(`:9: Function "py_test" is not global anymore and needs to be loaded from "%s".`, tables.PyLoadPath),
+		},
+		scopeBzl|scopeBuild)
+}
+
+func TestNativeProtoWarning(t *testing.T) {
+	checkFindingsAndFix(t, "native-proto", `
+"""My file"""
+
+def macro():
+    proto_library()
+    proto_lang_toolchain()
+    native.proto_lang_toolchain()
+    native.proto_library()
+
+    ProtoInfo
+    proto_common
+`, fmt.Sprintf(`
+"""My file"""
+
+load(%q, "ProtoInfo", "proto_common", "proto_lang_toolchain", "proto_library")
+
+def macro():
+    proto_library()
+    proto_lang_toolchain()
+    proto_lang_toolchain()
+    proto_library()
+
+    ProtoInfo
+    proto_common
+`, tables.ProtoLoadPath),
+		[]string{
+			fmt.Sprintf(`:4: Function "proto_library" is not global anymore and needs to be loaded from "%s".`, tables.ProtoLoadPath),
+			fmt.Sprintf(`:5: Function "proto_lang_toolchain" is not global anymore and needs to be loaded from "%s".`, tables.ProtoLoadPath),
+			fmt.Sprintf(`:6: Function "proto_lang_toolchain" is not global anymore and needs to be loaded from "%s".`, tables.ProtoLoadPath),
+			fmt.Sprintf(`:7: Function "proto_library" is not global anymore and needs to be loaded from "%s".`, tables.ProtoLoadPath),
+			fmt.Sprintf(`:9: Symbol "ProtoInfo" is not global anymore and needs to be loaded from "%s".`, tables.ProtoLoadPath),
+			fmt.Sprintf(`:10: Symbol "proto_common" is not global anymore and needs to be loaded from "%s".`, tables.ProtoLoadPath),
+		},
+		scopeBzl|scopeBuild)
+}
+
+func TestKeywordParameters(t *testing.T) {
+	checkFindingsAndFix(t, "keyword-positional-params", `
+foo(key = value)
+all(elements = [True, False])
+any(elements = [True, False])
+tuple(x = [1, 2, 3])
+list(x = [1, 2, 3])
+len(x = [1, 2, 3])
+str(x = foo)
+repr(x = foo)
+bool(x = 3)
+int(x = "3")
+int(x = "13", base = 8)
+dir(x = foo)
+type(x = foo)
+select(x = {})
+`, `
+foo(key = value)
+all([True, False])
+any([True, False])
+tuple([1, 2, 3])
+list([1, 2, 3])
+len([1, 2, 3])
+str(foo)
+repr(foo)
+bool(3)
+int("3")
+int("13", base = 8)
+dir(foo)
+type(foo)
+select({})
+`, []string{
+		`:2: Keyword parameter "elements" for "all" should be positional.`,
+		`:3: Keyword parameter "elements" for "any" should be positional.`,
+		`:4: Keyword parameter "x" for "tuple" should be positional.`,
+		`:5: Keyword parameter "x" for "list" should be positional.`,
+		`:6: Keyword parameter "x" for "len" should be positional.`,
+		`:7: Keyword parameter "x" for "str" should be positional.`,
+		`:8: Keyword parameter "x" for "repr" should be positional.`,
+		`:9: Keyword parameter "x" for "bool" should be positional.`,
+		`:10: Keyword parameter "x" for "int" should be positional.`,
+		`:11: Keyword parameter "x" for "int" should be positional.`,
+		`:12: Keyword parameter "x" for "dir" should be positional.`,
+		`:13: Keyword parameter "x" for "type" should be positional.`,
+		`:14: Keyword parameter "x" for "select" should be positional.`,
+	}, scopeEverywhere)
+
+	checkFindingsAndFix(t, "keyword-positional-params", `
+hasattr(
+  x = foo,
+  name = "bar",
+)
+getattr(
+  x = foo,
+  name = "bar",
+)
+getattr(
+  x = foo,
+  name = "bar",
+  default = "baz",
+)
+`, `
+hasattr(
+  foo,
+  "bar",
+)
+getattr(
+  foo,
+  "bar",
+)
+getattr(
+  foo,
+  "bar",
+  "baz",
+)
+`, []string{
+		`:2: Keyword parameter "x" for "hasattr" should be positional.`,
+		`:3: Keyword parameter "name" for "hasattr" should be positional.`,
+		`:6: Keyword parameter "x" for "getattr" should be positional.`,
+		`:7: Keyword parameter "name" for "getattr" should be positional.`,
+		`:10: Keyword parameter "x" for "getattr" should be positional.`,
+		`:11: Keyword parameter "name" for "getattr" should be positional.`,
+		`:12: Keyword parameter "default" for "getattr" should be positional.`,
+	}, scopeEverywhere)
+
+	checkFindingsAndFix(t, "keyword-positional-params", `
+glob(["*.cc"], ["test*"])
+glob(["*.cc"])
+glob(include = [], exclude = [])
+glob([], exclude = [])
+glob([], [], 1)
+glob([], [], 1, 2)
+glob(*args, [])
+`, `
+glob(["*.cc"], exclude = ["test*"])
+glob(["*.cc"])
+glob([], exclude = [])
+glob([], exclude = [])
+glob([], exclude = [], exclude_directories = 1)
+glob([], [], 1, 2)
+glob(*args, [])
+`, []string{
+		`:1: Parameter at the position 2 for "glob" should be keyword (exclude = ...).`,
+		`:3: Keyword parameter "include" for "glob" should be positional.`,
+		`:5: Parameter at the position 2 for "glob" should be keyword (exclude = ...)`,
+		`:5: Parameter at the position 3 for "glob" should be keyword (exclude_directories = ...)`,
+		`:6: Parameter at the position 2 for "glob" should be keyword (exclude = ...)`,
+		`:6: Parameter at the position 3 for "glob" should be keyword (exclude_directories = ...)`,
+		`:7: Parameter at the position 2 for "glob" should be keyword (exclude = ...)`,
+	}, scopeEverywhere)
+
+	checkFindingsAndFix(t, "keyword-positional-params", `
+native.glob(["*.cc"], ["test*"])
+native.glob(["*.cc"])
+native.glob(include = [], exclude = [])
+native.glob([], exclude = [])
+native.glob([], [], 1)
+native.glob([], [], 1, 2)
+native.glob(*args, [])
+`, `
+native.glob(["*.cc"], exclude = ["test*"])
+native.glob(["*.cc"])
+native.glob([], exclude = [])
+native.glob([], exclude = [])
+native.glob([], exclude = [], exclude_directories = 1)
+native.glob([], [], 1, 2)
+native.glob(*args, [])
+`, []string{
+		`:1: Parameter at the position 2 for "glob" should be keyword (exclude = ...).`,
+		`:3: Keyword parameter "include" for "glob" should be positional.`,
+		`:5: Parameter at the position 2 for "glob" should be keyword (exclude = ...)`,
+		`:5: Parameter at the position 3 for "glob" should be keyword (exclude_directories = ...)`,
+		`:6: Parameter at the position 2 for "glob" should be keyword (exclude = ...)`,
+		`:6: Parameter at the position 3 for "glob" should be keyword (exclude_directories = ...)`,
+		`:7: Parameter at the position 2 for "glob" should be keyword (exclude = ...)`,
+	}, scopeEverywhere)
 }

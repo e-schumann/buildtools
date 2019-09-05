@@ -6,7 +6,6 @@ def _buildifier_impl(ctx):
     args = [
         "-mode=%s" % ctx.attr.mode,
         "-v=%s" % str(ctx.attr.verbose).lower(),
-        "-showlog=%s" % str(ctx.attr.show_log).lower(),
     ]
 
     if ctx.attr.lint_mode:
@@ -19,10 +18,12 @@ def _buildifier_impl(ctx):
         args.append("-multi_diff")
     if ctx.attr.diff_command:
         args.append("-diff_command=%s" % ctx.attr.diff_command)
+    if ctx.attr.add_tables:
+        args.append("-add_tables=%s" % ctx.file.add_tables.path)
 
     exclude_patterns_str = ""
     if ctx.attr.exclude_patterns:
-        exclude_patterns = ["\! -path %s" % shell.quote(pattern) for pattern in ctx.attr.exclude_patterns]
+        exclude_patterns = ["\\! -path %s" % shell.quote(pattern) for pattern in ctx.attr.exclude_patterns]
         exclude_patterns_str = " ".join(exclude_patterns)
 
     out_file = ctx.actions.declare_file(ctx.label.name + ".bash")
@@ -50,9 +51,6 @@ _buildifier = rule(
         "verbose": attr.bool(
             doc = "Print verbose information on standard error",
         ),
-        "show_log": attr.bool(
-            doc = "Show log in check mode",
-        ),
         "mode": attr.string(
             default = "fix",
             doc = "Formatting mode",
@@ -76,6 +74,11 @@ _buildifier = rule(
         "multi_diff": attr.bool(
             default = False,
             doc = "Set to True if the diff command specified by the 'diff_command' can diff multiple files in the style of 'tkdiff'",
+        ),
+        "add_tables": attr.label(
+            mandatory = False,
+            doc="path to JSON file with custom table definitions which will be merged with the built-in tables",
+            allow_single_file = True,
         ),
         "_buildifier": attr.label(
             default = "@com_github_bazelbuild_buildtools//buildifier",

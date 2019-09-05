@@ -393,6 +393,21 @@ func AllLists(e build.Expr) []*build.ListExpr {
 	return nil
 }
 
+// AllSelects returns all the selects concatenated in an expression.
+func AllSelects(e build.Expr) []*build.CallExpr {
+	switch e := e.(type) {
+	case *build.BinaryExpr:
+		if e.Op == "+" {
+			return append(AllSelects(e.X), AllSelects(e.Y)...)
+		}
+	case *build.CallExpr:
+		if x, ok := e.X.(*build.Ident); ok && x.Name == "select" {
+			return []*build.CallExpr{e}
+		}
+	}
+	return nil
+}
+
 // FirstList works in the same way as AllLists, except that it
 // returns only one list, or nil.
 func FirstList(e build.Expr) *build.ListExpr {
@@ -461,24 +476,204 @@ func ContainsComments(expr build.Expr, str string) bool {
 	return false
 }
 
+// RemoveEmptySelectsAndConcatLists iterates the tree in order to turn
+// empty selects into empty lists and adjacent lists are concatenated
+func RemoveEmptySelectsAndConcatLists(e build.Expr) build.Expr {
+	switch e := e.(type) {
+	case *build.BinaryExpr:
+		if e.Op == "+" {
+			e.X = RemoveEmptySelectsAndConcatLists(e.X)
+			e.Y = RemoveEmptySelectsAndConcatLists(e.Y)
+
+			x, xIsList := e.X.(*build.ListExpr)
+			y, yIsList := e.Y.(*build.ListExpr)
+
+			if xIsList && yIsList {
+				return &build.ListExpr{List: append(x.List, y.List...)}
+			}
+
+			if xIsList && len(x.List) == 0 {
+				return e.Y
+			}
+
+			if yIsList && len(y.List) == 0 {
+				return e.X
+			}
+		}
+	case *build.CallExpr:
+		if x, ok := e.X.(*build.Ident); ok && x.Name == "select" {
+			if len(e.List) == 0 {
+				return &build.ListExpr{List: []build.Expr{}}
+			}
+
+			if dict, ok := e.List[0].(*build.DictExpr); ok {
+				for _, keyVal := range dict.List {
+					if keyVal, ok := keyVal.(*build.KeyValueExpr); ok {
+						val, ok := keyVal.Value.(*build.ListExpr)
+						if !ok || len(val.List) > 0 {
+							return e
+						}
+					} else {
+						return e
+					}
+				}
+
+				return &build.ListExpr{List: []build.Expr{}}
+			}
+		}
+	}
+
+	return e
+}
+
+// ComputeIntersection returns the intersection of the two lists given as parameters;
+// if the containing elements are not build.StringExpr, the result will be nil.
+func ComputeIntersection(list1, list2 []build.Expr) []build.Expr {
+	if list1 == nil || list2 == nil {
+		return nil
+	}
+
+	if len(list2) == 0 {
+		return []build.Expr{}
+	}
+
+	i := 0
+	for j, common := range list1 {
+		if common, ok := common.(*build.StringExpr); ok {
+			found := false
+			for _, elem := range list2 {
+				if str, ok := elem.(*build.StringExpr); ok {
+					if str.Value == common.Value {
+						found = true
+						break
+					}
+				} else {
+					return nil
+				}
+			}
+
+			if found {
+				list1[i] = list1[j]
+				i++
+			}
+		} else {
+			return nil
+		}
+	}
+	return list1[:i]
+}
+
+// SelectListsIntersection returns the intersection of the lists of strings inside
+// the dictionary argument of the select expression given as a parameter
+func SelectListsIntersection(sel *build.CallExpr, pkg string) (intersection []build.Expr) {
+	if len(sel.List) == 0 || len(sel.List) > 1 {
+		return nil
+	}
+
+	dict, ok := sel.List[0].(*build.DictExpr)
+	if !ok || len(dict.List) == 0 {
+		return nil
+	}
+
+	if keyVal, ok := dict.List[0].(*build.KeyValueExpr); ok {
+		if val, ok := keyVal.Value.(*build.ListExpr); ok {
+			intersection = make([]build.Expr, len(val.List))
+			copy(intersection, val.List)
+		}
+	}
+
+	for _, keyVal := range dict.List[1:] {
+		if keyVal, ok := keyVal.(*build.KeyValueExpr); ok {
+			if val, ok := keyVal.Value.(*build.ListExpr); ok {
+				intersection = ComputeIntersection(intersection, val.List)
+				if len(intersection) == 0 {
+					return intersection
+				}
+			} else {
+				return nil
+			}
+		} else {
+			return nil
+		}
+	}
+
+	return intersection
+}
+
+// ResolveAttr extracts common elements of the lists inside select dictionaries
+// and adds them at attribute level rather than select level, as well as turns
+// empty selects into empty lists and concatenates adjacent lists
+func ResolveAttr(r *build.Rule, attr, pkg string) {
+	var toExtract []build.Expr
+
+	e := r.Attr(attr)
+	for _, sel := range AllSelects(e) {
+		intersection := SelectListsIntersection(sel, pkg)
+		if intersection != nil {
+			toExtract = append(toExtract, intersection...)
+		}
+	}
+
+	for _, common := range toExtract {
+		e = AddValueToList(e, pkg, common, false) // this will also remove them from selects
+	}
+
+	r.SetAttr(attr, RemoveEmptySelectsAndConcatLists(e))
+}
+
+// SelectDelete removes the item from all the lists which are values
+// in the dictionary of every select
+func SelectDelete(e build.Expr, item, pkg string, deleted **build.StringExpr) {
+	for _, sel := range AllSelects(e) {
+		if len(sel.List) == 0 {
+			continue
+		}
+
+		if dict, ok := sel.List[0].(*build.DictExpr); ok {
+			for _, keyVal := range dict.List {
+				if keyVal, ok := keyVal.(*build.KeyValueExpr); ok {
+					if val, ok := keyVal.Value.(*build.ListExpr); ok {
+						RemoveFromList(val, item, pkg, deleted)
+					}
+				}
+			}
+		}
+	}
+}
+
+// RemoveFromList removes one element from a ListExpr and stores
+// the deleted StringExpr at the address pointed by the last parameter
+func RemoveFromList(li *build.ListExpr, item, pkg string, deleted **build.StringExpr) {
+	var all []build.Expr
+	for _, elem := range li.List {
+		if str, ok := elem.(*build.StringExpr); ok {
+			if LabelsEqual(str.Value, item, pkg) && (DeleteWithComments || !hasComments(str)) {
+				if deleted != nil {
+					*deleted = str
+				}
+
+				continue
+			}
+		}
+		all = append(all, elem)
+	}
+	li.List = all
+}
+
 // ListDelete deletes the item from a list expression in e and returns
 // the StringExpr deleted, or nil otherwise.
 func ListDelete(e build.Expr, item, pkg string) (deleted *build.StringExpr) {
+	if unquoted, _, err := build.Unquote(item); err == nil {
+		item = unquoted
+	}
 	deleted = nil
 	item = ShortenLabel(item, pkg)
 	for _, li := range AllLists(e) {
-		var all []build.Expr
-		for _, elem := range li.List {
-			if str, ok := elem.(*build.StringExpr); ok {
-				if LabelsEqual(str.Value, item, pkg) && (DeleteWithComments || !hasComments(str)) {
-					deleted = str
-					continue
-				}
-			}
-			all = append(all, elem)
-		}
-		li.List = all
+		RemoveFromList(li, item, pkg, &deleted)
 	}
+
+	SelectDelete(e, item, pkg, &deleted)
+
 	return deleted
 }
 
@@ -618,6 +813,9 @@ func AddValueToList(oldList build.Expr, pkg string, item build.Expr, sorted bool
 		// The value is already in the list.
 		return oldList
 	}
+
+	SelectDelete(oldList, str.Value, pkg, nil)
+
 	li := FirstList(oldList)
 	if li != nil {
 		if sorted {
@@ -700,6 +898,9 @@ func DictionaryGet(dict *build.DictExpr, key string) build.Expr {
 // DictionaryDelete looks for the key in the dictionary expression. If the key exists,
 // it removes the key-value pair and returns it. Otherwise it returns nil.
 func DictionaryDelete(dict *build.DictExpr, key string) (deleted build.Expr) {
+	if unquoted, _, err := build.Unquote(key); err == nil {
+		key = unquoted
+	}
 	deleted = nil
 	var all []build.Expr
 	for _, e := range dict.List {
@@ -780,7 +981,8 @@ func UsedSymbols(stmt build.Expr) map[string]bool {
 	return symbols
 }
 
-func newLoad(location string, from, to []string) *build.LoadStmt {
+// NewLoad creates a new LoadStmt node
+func NewLoad(location string, from, to []string) *build.LoadStmt {
 	load := &build.LoadStmt{
 		Module: &build.StringExpr{
 			Value: location,
@@ -792,6 +994,35 @@ func newLoad(location string, from, to []string) *build.LoadStmt {
 		load.To = append(load.To, &build.Ident{Name: to[i]})
 	}
 	return load
+}
+
+// AppendToLoad appends symbols to an existing load statement
+// Returns true if the statement was acually edited (if the required symbols haven't been
+// loaded yet)
+func AppendToLoad(load *build.LoadStmt, from, to []string) bool {
+	symbolsToLoad := make(map[string]string)
+	for i, s := range to {
+		symbolsToLoad[s] = from[i]
+	}
+	for _, ident := range load.To {
+		delete(symbolsToLoad, ident.Name) // Already loaded.
+	}
+
+	if len(symbolsToLoad) == 0 {
+		return false
+	}
+
+	// Append the remaining loads to the load statement.
+	sortedSymbols := []string{}
+	for s := range symbolsToLoad {
+		sortedSymbols = append(sortedSymbols, s)
+	}
+	sort.Strings(sortedSymbols)
+	for _, s := range sortedSymbols {
+		load.From = append(load.From, &build.Ident{Name: symbolsToLoad[s]})
+		load.To = append(load.To, &build.Ident{Name: s})
+	}
+	return true
 }
 
 // appendLoad tries to find an existing load location and append symbols to it.
@@ -816,21 +1047,18 @@ func appendLoad(stmts []build.Expr, location string, from, to []string) bool {
 		// that are already loaded in other subsequent calls.
 		lastLoad = load
 	}
-
 	if lastLoad == nil {
 		return false
 	}
 
 	// Append the remaining loads to the last load location.
-	sortedSymbols := []string{}
-	for s := range symbolsToLoad {
-		sortedSymbols = append(sortedSymbols, s)
+	from = []string{}
+	to = []string{}
+	for t, f := range symbolsToLoad {
+		from = append(from, f)
+		to = append(to, t)
 	}
-	sort.Strings(sortedSymbols)
-	for _, s := range sortedSymbols {
-		lastLoad.From = append(lastLoad.From, &build.Ident{Name: symbolsToLoad[s]})
-		lastLoad.To = append(lastLoad.To, &build.Ident{Name: s})
-	}
+	AppendToLoad(lastLoad, from, to)
 	return true
 }
 
@@ -848,7 +1076,7 @@ func InsertLoad(stmts []build.Expr, location string, from, to []string) []build.
 		return stmts
 	}
 
-	load := newLoad(location, from, to)
+	load := NewLoad(location, from, to)
 
 	var all []build.Expr
 	added := false

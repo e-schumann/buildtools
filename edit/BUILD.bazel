@@ -24,7 +24,12 @@ go_library(
 
 go_test(
     name = "go_default_test",
-    srcs = ["edit_test.go"],
+    srcs = [
+        "buildozer_command_file_test.go",
+        "buildozer_test.go",
+        "edit_test.go",
+        "fix_test.go",
+    ],
     embed = [":go_default_library"],
     deps = ["//build:go_default_library"],
 )

@@ -8,12 +8,12 @@ func TestWarnSameOriginLoad(t *testing.T) {
 	checkFindingsAndFix(t, category, `
 	load(
 		":f.bzl",
-		"s1"
+		"s2"
 	)
 	load(":t.bzl", "s3")
 	load(
 		":f.bzl",
-		"s2"
+		"s1"
 	)`, `
 	load(
 		":f.bzl",
@@ -21,11 +21,13 @@ func TestWarnSameOriginLoad(t *testing.T) {
 		"s2"
 	)
 	load(":t.bzl", "s3")`,
-		[]string{":7: There is already a load from \":f.bzl\". Please merge all loads from the same origin into a single one."},
+		[]string{`:7: There is already a load from ":f.bzl" on line 1. Please merge all loads from the same origin into a single one.`},
 		scopeEverywhere,
 	)
 
 	checkFindingsAndFix(t, category, `
+	"""Module"""
+
 	load(
 		":f.bzl",
 		"s1"
@@ -38,14 +40,16 @@ func TestWarnSameOriginLoad(t *testing.T) {
 		":f.bzl",
 		"s3"
 	)`, `
+	"""Module"""
+
 	load(
 		":f.bzl",
 		"s1",
 		"s2",
 		"s3"
 	)`,
-		[]string{":6: There is already a load from \":f.bzl\". Please merge all loads from the same origin into a single one.",
-			":10: There is already a load from \":f.bzl\". Please merge all loads from the same origin into a single one."},
+		[]string{`:8: There is already a load from ":f.bzl" on line 3. Please merge all loads from the same origin into a single one.`,
+			`:12: There is already a load from ":f.bzl" on line 3. Please merge all loads from the same origin into a single one.`},
 		scopeEverywhere,
 	)
 
@@ -55,23 +59,25 @@ func TestWarnSameOriginLoad(t *testing.T) {
 	`, `
 	load(":f.bzl", "s1", "s2", "s3")
   `,
-		[]string{":2: There is already a load from \":f.bzl\". Please merge all loads from the same origin into a single one."},
+		[]string{`:2: There is already a load from ":f.bzl" on line 1. Please merge all loads from the same origin into a single one.`},
 		scopeEverywhere,
 	)
 
 	checkFindingsAndFix(t, category, `
+	load(":g.bzl", "s0")
 	load(":f.bzl", "s1")
 	load(":f.bzl",
     "s2",
     "s3")
 	`, `
+	load(":g.bzl", "s0")
 	load(
       ":f.bzl",
       "s1",
       "s2",
       "s3",
   )`,
-		[]string{":2: There is already a load from \":f.bzl\". Please merge all loads from the same origin into a single one."},
+		[]string{`:3: There is already a load from ":f.bzl" on line 2. Please merge all loads from the same origin into a single one.`},
 		scopeEverywhere,
 	)
 
@@ -89,8 +95,8 @@ func TestWarnSameOriginLoad(t *testing.T) {
       "s4",
   )`,
 		[]string{
-			":2: There is already a load from \":f.bzl\". Please merge all loads from the same origin into a single one.",
-			":3: There is already a load from \":f.bzl\". Please merge all loads from the same origin into a single one.",
+			`:2: There is already a load from ":f.bzl" on line 1. Please merge all loads from the same origin into a single one.`,
+			`:3: There is already a load from ":f.bzl" on line 1. Please merge all loads from the same origin into a single one.`,
 		}, scopeEverywhere,
 	)
 }
@@ -100,6 +106,21 @@ func TestPackageOnTop(t *testing.T) {
 my_macro(name = "foo")
 package()`,
 		[]string{":2: Package declaration should be at the top of the file, after the load() statements, but before any call to a rule or a macro. package_group() and licenses() may be called before package()."},
+		scopeEverywhere)
+
+	checkFindings(t, "package-on-top", `
+# Some comments
+
+"""This is a docstring"""
+
+load(":foo.bzl", "foo")
+load(":bar.bzl", baz = "bar")
+
+package()
+
+foo(baz)
+`,
+		[]string{},
 		scopeEverywhere)
 }
 
@@ -159,17 +180,20 @@ func TestOutOfOrderLoad(t *testing.T) {
 # b comment
 load(":b.bzl", "b")
 b += 2
-# a comment
+# c comment
+load(":c.bzl", "c")
 load(":a.bzl", "a")
-a + b`, `
-# a comment
-load(":a.bzl", "a")
-b += 2
+a + b + c`, `
 # b comment
 load(":b.bzl", "b")
-a + b`,
-		[]string{":5: Load statement is out of its lexicographical order."},
-		scopeBuild|scopeBzl|scopeDefault)
+b += 2
+load(":a.bzl", "a")
+
+# c comment
+load(":c.bzl", "c")
+a + b + c`,
+		[]string{":6: Load statement is out of its lexicographical order."},
+		scopeEverywhere)
 
 	checkFindingsAndFix(t, "out-of-order-load", `
 # b comment
@@ -187,7 +211,7 @@ load(":b.bzl", "b")
 load(":c.bzl", "c")
 a + b + c`,
 		[]string{":6: Load statement is out of its lexicographical order."},
-		scopeBuild|scopeBzl|scopeDefault)
+		scopeEverywhere)
 
 	checkFindingsAndFix(t, "out-of-order-load", `
 load(":a.bzl", "a")
@@ -207,7 +231,7 @@ load(":b.bzl", "b")
 			":2: Load statement is out of its lexicographical order.",
 			":3: Load statement is out of its lexicographical order.",
 			":6: Load statement is out of its lexicographical order.",
-		}, scopeBuild|scopeBzl|scopeDefault)
+		}, scopeEverywhere)
 
 	checkFindingsAndFix(t, "out-of-order-load", `
 load(":a.bzl", "a")
@@ -215,7 +239,7 @@ load(":a.bzl", "a")
 `, `
 load(":a.bzl", "a")
 load(":a.bzl", "a")`,
-		[]string{}, scopeBuild|scopeBzl|scopeDefault)
+		[]string{}, scopeEverywhere)
 
 	checkFindingsAndFix(t, "out-of-order-load", `
 load("//foo:xyz.bzl", "xyz")
@@ -223,7 +247,7 @@ load("//foo/bar:mno.bzl", "mno")
 `, `
 load("//foo:xyz.bzl", "xyz")
 load("//foo/bar:mno.bzl", "mno")`,
-		[]string{}, scopeBuild|scopeBzl|scopeDefault)
+		[]string{}, scopeEverywhere)
 
 	checkFindingsAndFix(t, "out-of-order-load", `
 load("//foo:xyz.bzl", "xyz")
@@ -231,7 +255,7 @@ load("//foo2:mno.bzl", "mno")
 `, `
 load("//foo:xyz.bzl", "xyz")
 load("//foo2:mno.bzl", "mno")`,
-		[]string{}, scopeBuild|scopeBzl|scopeDefault)
+		[]string{}, scopeEverywhere)
 
 	checkFindingsAndFix(t, "out-of-order-load", `
 load("//foo:b.bzl", "b")
@@ -241,7 +265,7 @@ load("//foo:a.bzl", "a")
 load("//foo:b.bzl", "b")`,
 		[]string{
 			":2: Load statement is out of its lexicographical order.",
-		}, scopeBuild|scopeBzl|scopeDefault)
+		}, scopeEverywhere)
 }
 
 func TestUnsortedDictItems(t *testing.T) {

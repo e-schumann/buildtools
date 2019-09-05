@@ -23,13 +23,11 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"path"
-	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 
 	"github.com/bazelbuild/buildtools/build"
+	"github.com/bazelbuild/buildtools/buildifier/utils"
 	"github.com/bazelbuild/buildtools/differ"
 	"github.com/bazelbuild/buildtools/tables"
 	"github.com/bazelbuild/buildtools/warn"
@@ -39,13 +37,12 @@ var buildVersion = "redacted"
 var buildScmRevision = "redacted"
 
 var (
-	// Undocumented; for debugging.
-	showlog = flag.Bool("showlog", false, "show log in check mode")
-
 	help          = flag.Bool("help", false, "print usage information")
 	vflag         = flag.Bool("v", false, "print verbose information to standard error")
 	dflag         = flag.Bool("d", false, "alias for -mode=diff")
+	rflag         = flag.Bool("r", false, "find starlark files recursively")
 	mode          = flag.String("mode", "", "formatting mode: check, diff, or fix (default fix)")
+	format        = flag.String("format", "", "diagnostics format: text or json (default text)")
 	diffProgram   = flag.String("diff_command", "", "command to run when the formatting mode is diff (default uses the BUILDIFIER_DIFF, BUILDIFIER_MULTIDIFF, and DISPLAY environment variables to create the diff command)")
 	multiDiff     = flag.Bool("multi_diff", false, "the command specified by the -diff_command flag can diff multiple files in the style of tkdiff (default false)")
 	lint          = flag.String("lint", "", "lint mode: off, warn, or fix (default off)")
@@ -69,7 +66,7 @@ func stringList(name, help string) func() []string {
 }
 
 func usage() {
-	fmt.Fprintf(flag.CommandLine.Output(), `usage: buildifier [-d] [-v] [-diff_command=command] [-help] [-multi_diff] [-mode=mode] [-lint=lint_mode] [-path=path] [files...]
+	fmt.Fprintf(flag.CommandLine.Output(), `usage: buildifier [-d] [-v] [-r] [-diff_command=command] [-help] [-multi_diff] [-mode=mode] [-lint=lint_mode] [-path=path] [files...]
 
 Buildifier applies standard formatting to the named Starlark files.  The mode
 flag selects the processing: check, diff, fix, or print_if_changed.  In check
@@ -101,6 +98,14 @@ file names given, but the path can be given explicitly with the -path
 argument. This is especially useful when reformatting standard input,
 or in scripts that reformat a temporary copy of a file.
 
+Return codes used by buildifier:
+
+  0: success, everything went well
+  1: syntax errors in input
+  2: usage errors: invoked incorrectly
+  3: unexpected runtime errors: file I/O problems or internal bugs
+  4: check mode failed (reformat is needed)
+
 Full list of flags with their defaults:
 `)
 	flag.PrintDefaults()
@@ -127,92 +132,25 @@ func main() {
 	build.DisableRewrites = disable()
 	build.AllowSort = allowSort()
 
-	// Check input type.
-	switch *inputType {
-	case "build", "bzl", "workspace", "default", "auto":
-		// ok
-
-	default:
-		fmt.Fprintf(os.Stderr, "buildifier: unrecognized input type %s; valid types are build, bzl, workspace, default, auto\n", *inputType)
+	if err := utils.ValidateInputType(inputType); err != nil {
+		fmt.Fprintf(os.Stderr, "buildifier: %s\n", err)
 		os.Exit(2)
 	}
 
-	if *dflag {
-		if *mode != "" {
-			fmt.Fprintf(os.Stderr, "buildifier: cannot specify both -d and -mode flags\n")
-			os.Exit(2)
-		}
-		*mode = "diff"
-	}
-
-	// Check mode.
-	switch *mode {
-	case "":
-		*mode = "fix"
-
-	case "check", "diff", "fix", "print_if_changed":
-		// ok
-
-	default:
-		fmt.Fprintf(os.Stderr, "buildifier: unrecognized mode %s; valid modes are check, diff, fix\n", *mode)
+	if err := utils.ValidateFormat(format, mode); err != nil {
+		fmt.Fprintf(os.Stderr, "buildifier: %s\n", err)
 		os.Exit(2)
 	}
 
-	// Check lint mode.
-	switch *lint {
-	case "":
-		*lint = "off"
-
-	case "off":
-		// ok
-
-	case "warn", "fix":
-		if *mode != "fix" {
-			fmt.Fprintf(os.Stderr, "buildifier: lint mode %s is only compatible with --mode=fix\n", *lint)
-			os.Exit(2)
-		}
-
-	default:
-		fmt.Fprintf(os.Stderr, "buildifier: unrecognized lint mode %s; valid modes are warn and fix\n", *lint)
+	if err := utils.ValidateModes(mode, lint, dflag); err != nil {
+		fmt.Fprintf(os.Stderr, "buildifier: %s\n", err)
 		os.Exit(2)
 	}
 
-	// Check lint warnings
-	var warningsList []string
-	switch *warnings {
-	case "", "default":
-		warningsList = warn.DefaultWarnings
-	case "all":
-		warningsList = warn.AllWarnings
-	default:
-		// Either all or no warning categories should start with "+" or "-".
-		// If all of them start with "+" or "-", the semantics is
-		// "default set of warnings + something - something".
-		plus := map[string]bool{}
-		minus := map[string]bool{}
-		for _, warning := range strings.Split(*warnings, ",") {
-			if strings.HasPrefix(warning, "+") {
-				plus[warning[1:]] = true
-			} else if strings.HasPrefix(warning, "-") {
-				minus[warning[1:]] = true
-			} else {
-				warningsList = append(warningsList, warning)
-			}
-		}
-		if len(warningsList) > 0 && (len(plus) > 0 || len(minus) > 0) {
-			fmt.Fprintf(os.Stderr, "buildifier: warning categories with modifiers (\"+\" or \"-\") can't me mixed with raw warning categories\n")
-			os.Exit(2)
-		}
-		if len(warningsList) == 0 {
-			for _, warning := range warn.DefaultWarnings {
-				if !minus[warning] {
-					warningsList = append(warningsList, warning)
-				}
-			}
-			for warning := range plus {
-				warningsList = append(warningsList, warning)
-			}
-		}
+	warningsList, err := utils.ValidateWarnings(warnings, &warn.AllWarnings, &warn.DefaultWarnings)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "buildifier: %s\n", err)
+		os.Exit(2)
 	}
 
 	// If the path flag is set, must only be formatting a single file.
@@ -247,34 +185,62 @@ func main() {
 	}
 	diff = differ
 
-	if len(args) == 0 || (len(args) == 1 && args[0] == "-") {
+	exitCode := run(&args, &warningsList)
+	os.Exit(exitCode)
+}
+
+func run(args, warningsList *[]string) int {
+	tf := &utils.TempFile{}
+	defer tf.Clean()
+
+	exitCode := 0
+	var diagnostics *utils.Diagnostics
+	if len(*args) == 0 || (len(*args) == 1 && (*args)[0] == "-") {
 		// Read from stdin, write to stdout.
 		data, err := ioutil.ReadAll(os.Stdin)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "buildifier: reading stdin: %v\n", err)
-			os.Exit(2)
+			return 2
 		}
 		if *mode == "fix" {
 			*mode = "pipe"
 		}
-		processFile("", data, *inputType, *lint, warningsList, false)
+		var fileDiagnostics *utils.FileDiagnostics
+		fileDiagnostics, exitCode = processFile("", data, *inputType, *lint, warningsList, false, tf)
+		diagnostics = utils.NewDiagnostics(fileDiagnostics)
 	} else {
-		processFiles(args, *inputType, *lint, warningsList)
+		files := *args
+		if *rflag {
+			var err error
+			files, err = utils.ExpandDirectories(args)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "buildifier: %v\n", err)
+				return 3
+			}
+		}
+		diagnostics, exitCode = processFiles(files, *inputType, *lint, warningsList, tf)
+	}
+
+	diagnosticsOutput := diagnostics.Format(*format, *vflag)
+	if *format != "" {
+		// Explicitly provided --format means the diagnostics are printed to stdout
+		fmt.Printf(diagnosticsOutput)
+		// Exit code should be set to 0 so that other tools know they can safely parse the json
+		exitCode = 0
+	} else {
+		// --format is not provided, stdout is reserved for file contents
+		fmt.Fprint(os.Stderr, diagnosticsOutput)
 	}
 
 	if err := diff.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		exitCode = 2
+		return 2
 	}
 
-	for _, file := range toRemove {
-		os.Remove(file)
-	}
-
-	os.Exit(exitCode)
+	return exitCode
 }
 
-func processFiles(files []string, inputType, lint string, warningsList []string) {
+func processFiles(files []string, inputType, lint string, warningsList *[]string, tf *utils.TempFile) (*utils.Diagnostics, int) {
 	// Decide how many file reads to run in parallel.
 	// At most 100, and at most one per 10 input files.
 	nworker := 100
@@ -292,6 +258,7 @@ func processFiles(files []string, inputType, lint string, warningsList []string)
 		data []byte
 		err  error
 	}
+
 	ch := make([]chan result, nworker)
 	for i := 0; i < nworker; i++ {
 		ch[i] = make(chan result, 1)
@@ -303,6 +270,9 @@ func processFiles(files []string, inputType, lint string, warningsList []string)
 			}
 		}(i)
 	}
+
+	exitCode := 0
+	fileDiagnostics := []*utils.FileDiagnostics{}
 
 	// Process files. The processing still runs in a single goroutine
 	// in sequence. Only the reading of the files has been parallelized.
@@ -319,39 +289,33 @@ func processFiles(files []string, inputType, lint string, warningsList []string)
 			exitCode = 3
 			continue
 		}
-		processFile(file, res.data, inputType, lint, warningsList, len(files) > 1)
+		fd, newExitCode := processFile(file, res.data, inputType, lint, warningsList, len(files) > 1, tf)
+		if fd != nil {
+			fileDiagnostics = append(fileDiagnostics, fd)
+		}
+		if newExitCode != 0 {
+			exitCode = newExitCode
+		}
 	}
+	return utils.NewDiagnostics(fileDiagnostics...), exitCode
 }
-
-// exitCode is the code to use when exiting the program.
-// The codes used by buildifier are:
-//
-// 0: success, everything went well
-// 1: syntax errors in input
-// 2: usage errors: invoked incorrectly
-// 3: unexpected runtime errors: file I/O problems or internal bugs
-// 4: check mode failed (reformat is needed)
-var exitCode = 0
-
-// toRemove is a list of files to remove before exiting.
-var toRemove []string
 
 // diff is the differ to use when *mode == "diff".
 var diff *differ.Differ
 
 // processFile processes a single file containing data.
 // It has been read from filename and should be written back if fixing.
-func processFile(filename string, data []byte, inputType, lint string, warningsList []string, displayFileNames bool) {
-	defer func() {
-		if err := recover(); err != nil {
-			fmt.Fprintf(os.Stderr, "buildifier: %s: internal error: %v\n", filename, err)
-			exitCode = 3
-		}
-	}()
+func processFile(filename string, data []byte, inputType, lint string, warningsList *[]string, displayFileNames bool, tf *utils.TempFile) (*utils.FileDiagnostics, int) {
+	var exitCode int
 
-	parser := getParser(inputType)
+	displayFilename := filename
+	if *filePath != "" {
+		displayFilename = *filePath
+	}
 
-	f, err := parser(filename, data)
+	parser := utils.GetParser(inputType)
+
+	f, err := parser(displayFilename, data)
 	if err != nil {
 		// Do not use buildifier: prefix on this error.
 		// Since it is a parse error, it begins with file:line:
@@ -360,26 +324,16 @@ func processFile(filename string, data []byte, inputType, lint string, warningsL
 		if exitCode < 1 {
 			exitCode = 1
 		}
-		return
+		return utils.InvalidFileDiagnostics(displayFilename), exitCode
 	}
 
-	pkg := getPackageName(filename)
-	switch lint {
-	case "warn":
-		warnings := warn.FileWarnings(f, pkg, warningsList, false)
-		warn.PrintWarnings(f, warnings, false)
-		hasWarnings := len(warnings) > 0
-		if hasWarnings {
-			exitCode = 4
-		}
-	case "fix":
-		warn.FixWarnings(f, pkg, warningsList, *vflag)
+	pkg := utils.GetPackageName(displayFilename)
+	warnings := utils.Lint(f, pkg, lint, warningsList, *vflag)
+	if len(warnings) > 0 {
+		exitCode = 4
 	}
+	fileDiagnostics := utils.NewFileDiagnostics(f.DisplayPath(), warnings)
 
-	if *filePath != "" {
-		f.Path = *filePath
-	}
-	beforeRewrite := build.Format(f)
 	var info build.RewriteInfo
 	build.Rewrite(f, &info)
 
@@ -389,137 +343,68 @@ func processFile(filename string, data []byte, inputType, lint string, warningsL
 	case "check":
 		// check mode: print names of files that need formatting.
 		if !bytes.Equal(data, ndata) {
-			// Print:
-			//	name # list of what changed
-			reformat := ""
-			if !bytes.Equal(data, beforeRewrite) {
-				reformat = " reformat"
-			}
-			log := ""
-			if len(info.Log) > 0 && *showlog {
-				sort.Strings(info.Log)
-				var uniq []string
-				last := ""
-				for _, s := range info.Log {
-					if s != last {
-						last = s
-						uniq = append(uniq, s)
-					}
-				}
-				log = " " + strings.Join(uniq, " ")
-			}
-			fmt.Printf("%s #%s %s%s\n", filename, reformat, &info, log)
-			exitCode = 4
+			fileDiagnostics.Formatted = false
+			fileDiagnostics.SetRewrites(info.Stats())
+			return fileDiagnostics, 4
 		}
-		return
 
 	case "diff":
 		// diff mode: run diff on old and new.
 		if bytes.Equal(data, ndata) {
-			return
+			return fileDiagnostics, exitCode
 		}
-		outfile, err := writeTemp(ndata)
+		outfile, err := tf.WriteTemp(ndata)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "buildifier: %v\n", err)
-			exitCode = 3
-			return
+			return fileDiagnostics, 3
 		}
 		infile := filename
 		if filename == "" {
 			// data was read from standard filename.
 			// Write it to a temporary file so diff can read it.
-			infile, err = writeTemp(data)
+			infile, err = tf.WriteTemp(data)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "buildifier: %v\n", err)
-				exitCode = 3
-				return
+				return fileDiagnostics, 3
 			}
 		}
 		if displayFileNames {
-			fmt.Fprintf(os.Stderr, "%v:\n", filename)
+			fmt.Fprintf(os.Stderr, "%v:\n", f.DisplayPath())
 		}
 		if err := diff.Show(infile, outfile); err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
-			exitCode = 4
+			return fileDiagnostics, 4
 		}
 
 	case "pipe":
 		// pipe mode - reading from stdin, writing to stdout.
 		// ("pipe" is not from the command line; it is set above in main.)
 		os.Stdout.Write(ndata)
-		return
 
 	case "fix":
 		// fix mode: update files in place as needed.
 		if bytes.Equal(data, ndata) {
-			return
+			return fileDiagnostics, exitCode
 		}
 
 		err := ioutil.WriteFile(filename, ndata, 0666)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "buildifier: %s\n", err)
-			exitCode = 3
-			return
+			return fileDiagnostics, 3
 		}
 
 		if *vflag {
-			fmt.Fprintf(os.Stderr, "fixed %s\n", filename)
+			fmt.Fprintf(os.Stderr, "fixed %s\n", f.DisplayPath())
 		}
 	case "print_if_changed":
 		if bytes.Equal(data, ndata) {
-			return
+			return fileDiagnostics, exitCode
 		}
 
 		if _, err := os.Stdout.Write(ndata); err != nil {
 			fmt.Fprintf(os.Stderr, "buildifier: error writing output: %v\n", err)
-			exitCode = 3
-			return
+			return fileDiagnostics, 3
 		}
 	}
-}
-
-func getParser(inputType string) func(filename string, data []byte) (*build.File, error) {
-	switch inputType {
-	case "build":
-		return build.ParseBuild
-	case "bzl":
-		return build.ParseBzl
-	case "auto":
-		return build.Parse
-	case "workspace":
-		return build.ParseWorkspace
-	default:
-		return build.ParseDefault
-	}
-}
-
-// writeTemp writes data to a temporary file and returns the name of the file.
-func writeTemp(data []byte) (file string, err error) {
-	f, err := ioutil.TempFile("", "buildifier-tmp-")
-	if err != nil {
-		return "", fmt.Errorf("creating temporary file: %v", err)
-	}
-	name := f.Name()
-	toRemove = append(toRemove, name)
-	defer f.Close()
-	_, err = f.Write(data)
-	if err != nil {
-		return "", fmt.Errorf("writing temporary file: %v", err)
-	}
-	return name, nil
-}
-
-// getPackageName returns the package name of a file by searching for a WORKSPACE file
-func getPackageName(filename string) string {
-	dirs := filepath.SplitList(path.Dir(filename))
-	parent := ""
-	index := len(dirs) - 1
-	for i, chunk := range dirs {
-		parent = path.Join(parent, chunk)
-		metadata := path.Join(parent, "METADATA")
-		if _, err := os.Stat(metadata); !os.IsNotExist(err) {
-			index = i
-		}
-	}
-	return strings.Join(dirs[index+1:], "/")
+	return fileDiagnostics, exitCode
 }

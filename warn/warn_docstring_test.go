@@ -53,6 +53,14 @@ load("foo", "bar")
 bar()`,
 		[]string{":3: The file has no module docstring."},
 		scopeBzl|scopeDefault)
+
+	checkFindings(t, "module-docstring", `
+def foo(bar):
+  if bar:
+    f()
+  return g()`,
+		[]string{":1: The file has no module docstring."},
+		scopeBzl|scopeDefault)
 }
 
 func TestFunctionDocstringExists(t *testing.T) {
@@ -70,21 +78,6 @@ def f(x):
    return x
 `,
 		[]string{},
-		scopeEverywhere)
-
-	checkFindings(t, "function-docstring", `
-def f(x, y):
-   """Short function with a docstring
-
-   Arguments:
-     x: smth
-   """
-   return x + y
-`,
-		[]string{
-			`2: Argument "y" is not documented.`,
-			`4: Prefer 'Args:' to 'Arguments:' when documenting function arguments.`,
-		},
 		scopeEverywhere)
 
 	checkFindings(t, "function-docstring", `
@@ -112,119 +105,152 @@ def _f(x):
 `,
 		[]string{},
 		scopeEverywhere)
+}
 
-	checkFindings(t, "function-docstring", `
-def _f(x):
-   """Long private function
-   with a docstring"""
-   x += 1
-   x *= 2
-   x /= 3
-   x -= 4
-   x %= 5
-   return x
+func TestFunctionDocstringHeader(t *testing.T) {
+	checkFindings(t, "function-docstring-header", `
+def f():
+   """This is a function.
+   this is the description
+   """
+   pass
+   pass
+   pass
+   pass
+   pass
 `,
+		[]string{`2: The docstring for the function "f" should start with a one-line summary.`},
+		scopeEverywhere)
+
+	checkFindings(t, "function-docstring-header", `
+	def _f(x):
+	  """Long private function
+	  with a docstring"""
+	  x += 1
+	  x *= 2
+	  x /= 3
+	  x -= 4
+	  x %= 5
+	  return x
+	`,
 		[]string{
 			`:2: The docstring for the function "_f" should start with a one-line summary.`,
 		},
 		scopeEverywhere)
 
-	checkFindings(t, "function-docstring", `
-def _f(x, y):
-   """Long private function
-   
+	checkFindings(t, "function-docstring-header", `
+	def f(x):
+	  """Long function with a docstring
+
+		Docstring
+		body
+		"""
+	  x += 1
+	  x *= 2
+	  x /= 3
+	  x -= 4
+	  x %= 5
+	  return x
+	`,
+		[]string{},
+		scopeEverywhere)
+
+	checkFindings(t, "function-docstring-header", `
+def f():
+   """
+
+   This is a function.
+
+   This is a
+   multiline description"""
+   pass
+   pass
+   pass
+   pass
+   pass
+`,
+		[]string{},
+		scopeEverywhere)
+}
+
+func TestFunctionDocstringArgs(t *testing.T) {
+	checkFindings(t, "function-docstring-args", `
+def f(x):
+   """This is a function.
+
+   Documented here:
+   http://example.com
+
+   Args:
+     x: something, as described at
+       http://example.com
+
+   Returns:
+     something, as described at
+     https://example.com
+   """
+   pass
+   pass
+   pass
+   pass
+   pass
+   return x
+`,
+		[]string{},
+		scopeEverywhere)
+
+	checkFindings(t, "function-docstring-args", `
+def f(x):
+   """This is a function.
+
    Args:
      x: something
-     z: something
    """
-   x *= 2
-   x /= 3
-   x -= 4
-   x %= 5
-   return x
+   passf
+   pass
+   pass
+   pass
+   pass
+`,
+		[]string{},
+		scopeEverywhere)
+
+	checkFindings(t, "function-docstring-args", `
+def f(x, y):
+  """Short function with a docstring
+
+  Arguments:
+    x: smth
+  """
+  return x + y
+`,
+		[]string{
+			`2: Argument "y" is not documented.`,
+			`4: Prefer "Args:" to "Arguments:" when documenting function arguments.`,
+		},
+		scopeEverywhere)
+
+	checkFindings(t, "function-docstring-args", `
+def _f(x, y):
+  """Long private function
+  
+  Args:
+    x: something
+    z: something
+  """
+  x *= 2
+  x /= 3
+  x -= 4
+  x %= 5
+  return x
 `,
 		[]string{
 			`:2: Argument "y" is not documented.`,
 			`:6: Argument "z" is documented but doesn't exist in the function signature.`,
 		},
 		scopeEverywhere)
-}
 
-func TestFunctionDocstringFormat(t *testing.T) {
-	checkFindings(t, "function-docstring", `
-def f(x):
-   """This is a function.
-
-   Args:
-     x: something
-
-   Returns:
-     something
-   """
-   pass
-   pass
-   pass
-   pass
-   pass
-   return x
-`,
-		[]string{},
-		scopeEverywhere)
-
-	checkFindings(t, "function-docstring", `
-def f(x):
-   """This is a function.
-
-   Args:
-     x: something
-   """
-   pass
-   pass
-   pass
-   pass
-   pass
-`,
-		[]string{},
-		scopeEverywhere)
-
-	checkFindings(t, "function-docstring", `
-def f(x):
-   """This is a function.
-
-   Args:
-     x: something
-   """
-   pass
-   pass
-   pass
-   pass
-   pass
-   return x
-`,
-		[]string{`2: Return value of "f" is not documented.`},
-		scopeEverywhere)
-
-	checkFindings(t, "function-docstring", `
-def f(x):
-   """This is a function.
-
-   Args:
-     x: something
-   """
-   pass
-   pass
-   pass
-   pass
-   pass
-   if foo:
-     return
-   else:
-     return x
-`,
-		[]string{`2: Return value of "f" is not documented.`},
-		scopeEverywhere)
-
-	checkFindings(t, "function-docstring", `
+	checkFindings(t, "function-docstring-args", `
 def f(x, y):
    """This is a function.
 
@@ -244,11 +270,11 @@ def f(x, y):
 `,
 		[]string{
 			`2: Argument "y" is not documented.`,
-			`4: Prefer 'Args:' to 'Arguments:' when documenting function arguments.`,
+			`4: Prefer "Args:" to "Arguments:" when documenting function arguments.`,
 			`7: Argument "z" is documented but doesn't exist in the function signature.`,
 		}, scopeEverywhere)
 
-	checkFindings(t, "function-docstring", `
+	checkFindings(t, "function-docstring-args", `
 def f(x, y, z = None, *args, **kwargs):
    """This is a function.
    """
@@ -263,7 +289,7 @@ def f(x, y, z = None, *args, **kwargs):
 		},
 		scopeEverywhere)
 
-	checkFindings(t, "function-docstring", `
+	checkFindings(t, "function-docstring-args", `
 def f(x, y, z = None, *args, **kwargs):
    """This is a function.
 
@@ -283,38 +309,7 @@ def f(x, y, z = None, *args, **kwargs):
 		[]string{},
 		scopeEverywhere)
 
-	checkFindings(t, "function-docstring", `
-def f():
-   """This is a function.
-   this is the description
-   """
-   pass
-   pass
-   pass
-   pass
-   pass
-`,
-		[]string{`2: The docstring for the function "f" should start with a one-line summary.`},
-		scopeEverywhere)
-
-	checkFindings(t, "function-docstring", `
-def f():
-   """
-
-   This is a function.
-
-   This is a
-   multiline description"""
-   pass
-   pass
-   pass
-   pass
-   pass
-`,
-		[]string{},
-		scopeEverywhere)
-
-	checkFindings(t, "function-docstring", `
+	checkFindings(t, "function-docstring-args", `
 def f(x):
    """
    This is a function.
@@ -335,5 +330,80 @@ def f(x):
    return None
 `,
 		[]string{},
+		scopeEverywhere)
+}
+
+func TestFunctionDocstringReturn(t *testing.T) {
+	checkFindings(t, "function-docstring-return", `
+def f(x):
+   """This is a function.
+
+   Args:
+     x: something
+
+   Returns:
+     something
+   """
+   pass
+   pass
+   pass
+   pass
+   pass
+   return x
+`,
+		[]string{},
+		scopeEverywhere)
+
+	checkFindings(t, "function-docstring-return", `
+def f(x):
+   """This is a function.
+
+   Args:
+     x: something
+   """
+   pass
+   pass
+   pass
+   pass
+   pass
+`,
+		[]string{},
+		scopeEverywhere)
+
+	checkFindings(t, "function-docstring-return", `
+def f(x):
+   """This is a function.
+
+   Args:
+     x: something
+   """
+   pass
+   pass
+   pass
+   pass
+   pass
+   return x
+`,
+		[]string{`2: Return value of "f" is not documented.`},
+		scopeEverywhere)
+
+	checkFindings(t, "function-docstring-return", `
+def f(x):
+   """This is a function.
+
+   Args:
+     x: something
+   """
+   pass
+   pass
+   pass
+   pass
+   pass
+   if foo:
+     return
+   else:
+     return x
+`,
+		[]string{`2: Return value of "f" is not documented.`},
 		scopeEverywhere)
 }

@@ -18,13 +18,12 @@ distributed under the License is distributed on an "AS IS" BASIS,
 package build
 
 import (
+	"github.com/bazelbuild/buildtools/tables"
 	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
-
-	"github.com/bazelbuild/buildtools/tables"
 )
 
 // For debugging: flag to disable certain rewrites.
@@ -80,39 +79,23 @@ type RewriteInfo struct {
 	SortLoad         int      // number of load argument lists sorted
 	FormatDocstrings int      // number of reindented docstrings
 	ReorderArguments int      // number of reordered function call arguments
+	EditOctal        int      // number of edited octals
 	Log              []string // log entries - may change
 }
 
-func (info *RewriteInfo) String() string {
-	s := ""
-	if info.EditLabel > 0 {
-		s += " label"
+// Stats returns a map with statistics about applied rewrites
+func (info *RewriteInfo) Stats() map[string]int {
+	return map[string]int{
+		"label":            info.EditLabel,
+		"callname":         info.NameCall,
+		"callsort":         info.SortCall,
+		"listsort":         info.SortStringList,
+		"unsafesort":       info.UnsafeSort,
+		"sortload":         info.SortLoad,
+		"formatdocstrings": info.FormatDocstrings,
+		"reorderarguments": info.ReorderArguments,
+		"editoctal":        info.EditOctal,
 	}
-	if info.NameCall > 0 {
-		s += " callname"
-	}
-	if info.SortCall > 0 {
-		s += " callsort"
-	}
-	if info.SortStringList > 0 {
-		s += " listsort"
-	}
-	if info.UnsafeSort > 0 {
-		s += " unsafesort"
-	}
-	if info.SortLoad > 0 {
-		s += " sortload"
-	}
-	if info.FormatDocstrings > 0 {
-		s += " formatdocstrings"
-	}
-	if info.ReorderArguments > 0 {
-		s += " reorderarguments"
-	}
-	if s != "" {
-		s = s[1:]
-	}
-	return s
 }
 
 // Each rewrite function can be either applied for BUILD files, other files (such as .bzl),
@@ -135,9 +118,10 @@ var rewrites = []struct {
 	{"label", fixLabels, scopeBuild},
 	{"listsort", sortStringLists, scopeBoth},
 	{"multiplus", fixMultilinePlus, scopeBuild},
-	{"loadsort", sortLoadArgs, scopeBoth},
+	{"loadsort", sortAllLoadArgs, scopeBoth},
 	{"formatdocstrings", formatDocstrings, scopeBoth},
 	{"reorderarguments", reorderArguments, scopeBoth},
+	{"editoctal", editOctals, scopeBoth},
 }
 
 // DisableLoadSortForBuildFiles disables the loadsort transformation for BUILD files.
@@ -838,16 +822,13 @@ func fixMultilinePlus(f *File, info *RewriteInfo) {
 	})
 }
 
-func sortLoadArgs(f *File, info *RewriteInfo) {
+// sortAllLoadArgs sorts all load arguments in the file
+func sortAllLoadArgs(f *File, info *RewriteInfo) {
 	Walk(f, func(v Expr, stk []Expr) {
-		load, ok := v.(*LoadStmt)
-		if !ok {
-			return
-		}
-		args := loadArgs{From: load.From, To: load.To}
-		sort.Sort(args)
-		if args.modified {
-			info.SortLoad++
+		if load, ok := v.(*LoadStmt); ok {
+			if SortLoadArgs(load) {
+				info.SortLoad++
+			}
 		}
 	})
 }
@@ -906,6 +887,13 @@ func (args loadArgs) Less(i, j int) bool {
 	return args.To[i].Name < args.To[j].Name
 }
 
+// SortLoadArgs sorts a load statement arguments (lexicographically, but positional first)
+func SortLoadArgs(load *LoadStmt) bool {
+	args := loadArgs{From: load.From, To: load.To}
+	sort.Sort(args)
+	return args.modified
+}
+
 // formatDocstrings fixes the indentation and trailing whitespace of docstrings
 func formatDocstrings(f *File, info *RewriteInfo) {
 	Walk(f, func(v Expr, stk []Expr) {
@@ -927,7 +915,7 @@ func formatDocstrings(f *File, info *RewriteInfo) {
 		if updatedToken != docstring.Token {
 			docstring.Token = updatedToken
 			// Update the value to keep it consistent with Token
-			docstring.Value, _, _ = unquote(updatedToken)
+			docstring.Value, _, _ = Unquote(updatedToken)
 			info.FormatDocstrings++
 		}
 	})
@@ -994,6 +982,21 @@ func reorderArguments(f *File, info *RewriteInfo) {
 		if !sort.SliceIsSorted(call.List, compare) {
 			sort.SliceStable(call.List, compare)
 			info.ReorderArguments++
+		}
+	})
+}
+
+// editOctals inserts 'o' into octal numbers to make it more obvious they are octal
+// 0123 -> 0o123
+func editOctals(f *File, info *RewriteInfo) {
+	Walk(f, func(expr Expr, stack []Expr) {
+		l, ok := expr.(*LiteralExpr)
+		if !ok {
+			return
+		}
+		if len(l.Token) > 1 && l.Token[0] == '0' && l.Token[1] >= '0' && l.Token[1] <= '9' {
+			l.Token = "0o" + l.Token[1:]
+			info.EditOctal++
 		}
 	})
 }

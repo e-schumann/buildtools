@@ -11,6 +11,35 @@ import (
 	"github.com/bazelbuild/buildtools/edit"
 )
 
+// LintMode is an enum representing a linter mode. Can be either "warn", "fix", or "suggest"
+type LintMode int
+
+const (
+	// ModeWarn means only warnings should be returned for each finding.
+	ModeWarn LintMode = iota
+	// ModeFix means that all warnings that can be fixed automatically should be fixed and
+	// no warnings should be returned for them.
+	ModeFix
+	// ModeSuggest means that automatic fixes shouldn't be applied, but instead corresponding
+	// suggestions should be attached to all warnings that can be fixed automatically.
+	ModeSuggest
+)
+
+// LinterFinding is a low-level warning reported by single linter/fixer functions.
+type LinterFinding struct {
+	Start       build.Position
+	End         build.Position
+	Message     string
+	URL         string
+	Replacement []LinterReplacement
+}
+
+// LinterReplacement is a low-level object returned by single fixer functions.
+type LinterReplacement struct {
+	Old *build.Expr
+	New build.Expr
+}
+
 // A Finding is a warning reported by the analyzer. It may contain an optional suggested fix.
 type Finding struct {
 	File        *build.File
@@ -26,8 +55,8 @@ type Finding struct {
 // A Replacement is a suggested fix. Text between Start and End should be replaced with Content.
 type Replacement struct {
 	Description string
-	Start       build.Position
-	End         build.Position
+	Start       int
+	End         int
 	Content     string
 }
 
@@ -36,76 +65,93 @@ func docURL(cat string) string {
 }
 
 // makeFinding creates a Finding object
-func makeFinding(f *build.File, start, end build.Position, cat string, msg string, actionable bool, fix *Replacement) *Finding {
+func makeFinding(f *build.File, start, end build.Position, cat, url, msg string, actionable bool, fix *Replacement) *Finding {
+	if url == "" {
+		url = docURL(cat)
+	}
 	return &Finding{
 		File:        f,
 		Start:       start,
 		End:         end,
 		Category:    cat,
-		URL:         docURL(cat),
+		URL:         url,
 		Message:     msg,
 		Actionable:  actionable,
 		Replacement: fix,
 	}
 }
 
-// MakeFix creates a Replacement object
-func MakeFix(f *build.File, desc string, start build.Position, end build.Position, newContent string) *Replacement {
-	return &Replacement{
-		Description: desc,
+// makeLinterFinding creates a LinterFinding object
+func makeLinterFinding(node build.Expr, message string, replacement ...LinterReplacement) *LinterFinding {
+	start, end := node.Span()
+	return &LinterFinding{
 		Start:       start,
 		End:         end,
-		Content:     newContent,
+		Message:     message,
+		Replacement: replacement,
 	}
 }
 
 // RuleWarningMap lists the warnings that run on a single rule.
 // These warnings run only on BUILD files (not bzl files).
-var RuleWarningMap = map[string]func(f *build.File, pkg string, expr build.Expr) *Finding{
+var RuleWarningMap = map[string]func(call *build.CallExpr, pkg string) *LinterFinding{
 	"positional-args": positionalArgumentsWarning,
 }
 
 // FileWarningMap lists the warnings that run on the whole file.
-var FileWarningMap = map[string]func(f *build.File, fix bool) []*Finding{
-	"attr-cfg":            attrConfigurationWarning,
-	"attr-license":        attrLicenseWarning,
-	"attr-non-empty":      attrNonEmptyWarning,
-	"attr-output-default": attrOutputDefaultWarning,
-	"attr-single-file":    attrSingleFileWarning,
-	"confusing-name":      confusingNameWarning,
-	"constant-glob":       constantGlobWarning,
-	"ctx-actions":         ctxActionsWarning,
-	"ctx-args":            contextArgsAPIWarning,
-	"depset-iteration":    depsetIterationWarning,
-	"depset-union":        depsetUnionWarning,
-	"dict-concatenation":  dictionaryConcatenationWarning,
-	"duplicated-name":     duplicatedNameWarning,
-	"filetype":            fileTypeWarning,
-	"function-docstring":  functionDocstringWarning,
-	"git-repository":      nativeGitRepositoryWarning,
-	"http-archive":        nativeHTTPArchiveWarning,
-	"integer-division":    integerDivisionWarning,
-	"load":                unusedLoadWarning,
-	"load-on-top":         loadOnTopWarning,
-	"return-value":        missingReturnValueWarning,
-	"module-docstring":    moduleDocstringWarning,
-	"name-conventions":    nameConventionsWarning,
-	"native-build":        nativeInBuildFilesWarning,
-	"native-package":      nativePackageWarning,
-	"no-effect":           noEffectWarning,
-	"out-of-order-load":   outOfOrderLoadWarning,
-	"output-group":        outputGroupWarning,
-	"package-name":        packageNameWarning,
-	"package-on-top":      packageOnTopWarning,
-	"redefined-variable":  redefinedVariableWarning,
-	"repository-name":     repositoryNameWarning,
-	"rule-impl-return":    ruleImplReturnWarning,
-	"same-origin-load":    sameOriginLoadWarning,
-	"string-iteration":    stringIterationWarning,
-	"uninitialized":       uninitializedVariableWarning,
-	"unreachable":         unreachableStatementWarning,
-	"unsorted-dict-items": unsortedDictItemsWarning,
-	"unused-variable":     unusedVariableWarning,
+var FileWarningMap = map[string]func(f *build.File) []*LinterFinding{
+	"attr-cfg":                  attrConfigurationWarning,
+	"attr-license":              attrLicenseWarning,
+	"attr-non-empty":            attrNonEmptyWarning,
+	"attr-output-default":       attrOutputDefaultWarning,
+	"attr-single-file":          attrSingleFileWarning,
+	"build-args-kwargs":         argsKwargsInBuildFilesWarning,
+	"confusing-name":            confusingNameWarning,
+	"constant-glob":             constantGlobWarning,
+	"ctx-actions":               ctxActionsWarning,
+	"ctx-args":                  contextArgsAPIWarning,
+	"depset-iteration":          depsetIterationWarning,
+	"depset-union":              depsetUnionWarning,
+	"dict-concatenation":        dictionaryConcatenationWarning,
+	"duplicated-name":           duplicatedNameWarning,
+	"filetype":                  fileTypeWarning,
+	"function-docstring":        functionDocstringWarning,
+	"function-docstring-header": functionDocstringHeaderWarning,
+	"function-docstring-args":   functionDocstringArgsWarning,
+	"function-docstring-return": functionDocstringReturnWarning,
+	"git-repository":            nativeGitRepositoryWarning,
+	"http-archive":              nativeHTTPArchiveWarning,
+	"integer-division":          integerDivisionWarning,
+	"keyword-positional-params": keywordPositionalParametersWarning,
+	"load":                      unusedLoadWarning,
+	"load-on-top":               loadOnTopWarning,
+	"module-docstring":          moduleDocstringWarning,
+	"name-conventions":          nameConventionsWarning,
+	"native-android":            nativeAndroidRulesWarning,
+	"native-build":              nativeInBuildFilesWarning,
+	"native-cc":                 nativeCcRulesWarning,
+	"native-java":               nativeJavaRulesWarning,
+	"native-package":            nativePackageWarning,
+	"native-proto":              nativeProtoRulesWarning,
+	"native-py":                 nativePyRulesWarning,
+	"no-effect":                 noEffectWarning,
+	"output-group":              outputGroupWarning,
+	"out-of-order-load":         outOfOrderLoadWarning,
+	"overly-nested-depset":      overlyNestedDepsetWarning,
+	"package-name":              packageNameWarning,
+	"package-on-top":            packageOnTopWarning,
+	"print":                     printWarning,
+	"redefined-variable":        redefinedVariableWarning,
+	"repository-name":           repositoryNameWarning,
+	"rule-impl-return":          ruleImplReturnWarning,
+	"return-value":              missingReturnValueWarning,
+	"same-origin-load":          sameOriginLoadWarning,
+	"string-escape":             stringEscapeWarning,
+	"string-iteration":          stringIterationWarning,
+	"uninitialized":             uninitializedVariableWarning,
+	"unreachable":               unreachableStatementWarning,
+	"unsorted-dict-items":       unsortedDictItemsWarning,
+	"unused-variable":           unusedVariableWarning,
 }
 
 // nonDefaultWarnings contains warnings that are enabled by default because they're not applicable
@@ -115,121 +161,186 @@ var nonDefaultWarnings = map[string]bool{
 	"unsorted-dict-items": true, // dict items should be sorted
 }
 
-// DisabledWarning checks if the warning was disabled by a comment.
-// The comment format is buildozer: disable=<warning>
-func DisabledWarning(f *build.File, finding *Finding, warning string) bool {
-	format := "buildozer: disable=" + warning
-	findingLine := finding.Start.Line
+// fileWarningWrapper is a wrapper that converts a file warning function to a generic function.
+// A generic function takes a `pkg string` argument which is not used for file warnings, so it's just removed.
+func fileWarningWrapper(fct func(f *build.File) []*LinterFinding) func(f *build.File, pkg string) []*LinterFinding {
+	return func(f *build.File, pkg string) []*LinterFinding {
+		return fct(f)
+	}
+}
 
-	for _, stmt := range f.Stmt {
-		stmtStart, _ := stmt.Span()
-		if stmtStart.Line == findingLine {
-			// Is this specific line disabled?
-			if edit.ContainsComments(stmt, format) {
-				return true
-			}
+// ruleWarningWrapper is a wrapper that converts a per-rule function to a per-file function.
+// It also doesn't run on .bzl or default files, only on BUILD and WORKSPACE files.
+func ruleWarningWrapper(ruleWarning func(call *build.CallExpr, pkg string) *LinterFinding) func(f *build.File, pkg string) []*LinterFinding {
+	return func(f *build.File, pkg string) []*LinterFinding {
+		if f.Type != build.TypeBuild && f.Type != build.TypeWorkspace {
+			return nil
 		}
-		// Check comments within a rule
-		rule, ok := stmt.(*build.CallExpr)
-		if ok {
-			for _, stmt := range rule.List {
-				stmtStart, _ := stmt.Span()
-				if stmtStart.Line != findingLine {
-					continue
+		var findings []*LinterFinding
+		for _, stmt := range f.Stmt {
+			switch stmt := stmt.(type) {
+			case *build.CallExpr:
+				finding := ruleWarning(stmt, pkg)
+				if finding != nil {
+					findings = append(findings, finding)
 				}
-				// Is the whole rule or this specific line as a comment
-				// to disable this warning?
-				if edit.ContainsComments(rule, format) ||
-					edit.ContainsComments(stmt, format) {
-					return true
-				}
-			}
-		}
-		// Check comments within a load statement
-		load, ok := stmt.(*build.LoadStmt)
-		if ok {
-			loadHasComment := edit.ContainsComments(load, format)
-			module := load.Module
-			if module.Start.Line == findingLine {
-				if edit.ContainsComments(module, format) || loadHasComment {
-					return true
-				}
-			}
-			for i, to := range load.To {
-				from := load.From[i]
-				if to.NamePos.Line == findingLine || from.NamePos.Line == findingLine {
-					if edit.ContainsComments(to, format) || edit.ContainsComments(from, format) || loadHasComment {
-						return true
+			case *build.Comprehension:
+				// Rules are often called within list comprehensions, e.g. [my_rule(foo) for foo in bar]
+				if call, ok := stmt.Body.(*build.CallExpr); ok {
+					finding := ruleWarning(call, pkg)
+					if finding != nil {
+						findings = append(findings, finding)
 					}
 				}
+			}
+		}
+		return findings
+	}
+}
+
+// runWarningsFunction runs a linter/fixer function over a file and applies the fixes conditionally
+func runWarningsFunction(category string, f *build.File, pkg string, fct func(f *build.File, pkg string) []*LinterFinding, formatted *[]byte, mode LintMode) []*Finding {
+	findings := []*Finding{}
+	for _, w := range fct(f, pkg) {
+		if !DisabledWarning(f, w.Start.Line, category) {
+			finding := makeFinding(f, w.Start, w.End, category, w.URL, w.Message, true, nil)
+			if len(w.Replacement) > 0 {
+				// An automatic fix exists
+				switch mode {
+				case ModeFix:
+					// Apply the fix and discard the finding
+					for _, r := range w.Replacement {
+						*r.Old = r.New
+					}
+					finding = nil
+				case ModeSuggest:
+					// Apply the fix, calculate the diff and roll back the fix
+					newContents := formatWithFix(f, &w.Replacement)
+
+					start, end, replacement := calculateDifference(formatted, &newContents)
+					finding.Replacement = &Replacement{
+						Description: w.Message,
+						Start:       start,
+						End:         end,
+						Content:     replacement,
+					}
+				}
+			}
+			if finding != nil {
+				findings = append(findings, finding)
 			}
 		}
 	}
+	return findings
+}
 
-	return false
+func hasDisablingComment(expr build.Expr, warning string) bool {
+	return edit.ContainsComments(expr, "buildifier: disable="+warning) ||
+		edit.ContainsComments(expr, "buildozer: disable="+warning)
+}
+
+// DisabledWarning checks if the warning was disabled by a comment.
+// The comment format is buildozer: disable=<warning>
+func DisabledWarning(f *build.File, findingLine int, warning string) bool {
+	disabled := false
+
+	build.Walk(f, func(expr build.Expr, stack []build.Expr) {
+		if expr == nil {
+			return
+		}
+
+		start, end := expr.Span()
+		if findingLine < start.Line || findingLine > end.Line {
+			return
+		}
+
+		if hasDisablingComment(expr, warning) {
+			disabled = true
+			return
+		}
+	})
+
+	return disabled
 }
 
 // FileWarnings returns a list of all warnings found in the file.
-func FileWarnings(f *build.File, pkg string, enabledWarnings []string, fix bool) []*Finding {
+func FileWarnings(f *build.File, pkg string, enabledWarnings []string, formatted *[]byte, mode LintMode) []*Finding {
 	findings := []*Finding{}
-	for _, warn := range enabledWarnings {
+
+	// Sort the warnings to make sure they're applied in the same determined order
+	// Make a local copy first to avoid race conditions
+	warnings := append([]string{}, enabledWarnings...)
+	sort.Strings(warnings)
+
+	// If suggestions are requested and formatted file is not provided, format it to compare modified versions with
+	if mode == ModeSuggest && formatted == nil {
+		contents := build.Format(f)
+		formatted = &contents
+	}
+
+	for _, warn := range warnings {
 		if fct, ok := FileWarningMap[warn]; ok {
-			for _, w := range fct(f, fix) {
-				if !DisabledWarning(f, w, warn) {
-					findings = append(findings, w)
-				}
-			}
+			findings = append(findings, runWarningsFunction(warn, f, pkg, fileWarningWrapper(fct), formatted, mode)...)
+		} else if fct, ok := RuleWarningMap[warn]; ok {
+			findings = append(findings, runWarningsFunction(warn, f, pkg, ruleWarningWrapper(fct), formatted, mode)...)
 		} else {
-			fn := RuleWarningMap[warn]
-			if fn == nil {
-				log.Fatalf("unexpected warning %q", warn)
-			}
-			if f.Type != build.TypeBuild && f.Type != build.TypeWorkspace {
-				continue
-			}
-			for _, stmt := range f.Stmt {
-				if w := fn(f, pkg, stmt); w != nil {
-					if !DisabledWarning(f, w, warn) {
-						findings = append(findings, w)
-					}
-				}
-			}
+			log.Fatalf("unexpected warning %q", warn)
 		}
 	}
 	sort.Slice(findings, func(i, j int) bool { return findings[i].Start.Line < findings[j].Start.Line })
 	return findings
 }
 
-// PrintWarnings prints the list of warnings returned from calling FileWarnings.
-// Actionable warnings list their link in parens, inactionable warnings list
-// their link in square brackets.
-func PrintWarnings(f *build.File, warnings []*Finding, showReplacements bool) {
-	for _, w := range warnings {
-		formatString := "%s:%d: %s: %s (%s)"
-		if !w.Actionable {
-			formatString = "%s:%d: %s: %s [%s]"
-		}
-		fmt.Fprintf(os.Stderr, formatString,
-			w.File.DisplayPath(),
-			w.Start.Line,
-			w.Category,
-			w.Message,
-			w.URL)
-		if showReplacements && w.Replacement != nil {
-			r := w.Replacement
-			fmt.Fprintf(os.Stderr, " [%d..%d): %s\n",
-				r.Start.Byte,
-				r.End.Byte,
-				r.Content)
-		} else {
-			fmt.Fprintf(os.Stderr, "\n")
-		}
+// formatWithFix applies a fix, formats a file, and rolls back the fix
+func formatWithFix(f *build.File, replacements *[]LinterReplacement) []byte {
+	for i := range *replacements {
+		r := (*replacements)[i]
+		old := *r.Old
+		*r.Old = r.New
+		defer func() { *r.Old = old }()
 	}
+
+	return build.Format(f)
+}
+
+// calculateDifference compares two file contents and returns a replacement in the form of
+// a 3-tuple (byte from, byte to (non inclusive), a string to replace with).
+func calculateDifference(old, new *[]byte) (start, end int, replacement string) {
+	commonPrefix := 0 // length of the common prefix
+	for i, b := range *old {
+		if i >= len(*new) || b != (*new)[i] {
+			break
+		}
+		commonPrefix++
+	}
+
+	commonSuffix := 0 // length of the common suffix
+	for i := range *old {
+		b := (*old)[len(*old)-1-i]
+		if i >= len(*new) || b != (*new)[len(*new)-1-i] {
+			break
+		}
+		commonSuffix++
+	}
+
+	// In some cases common suffix and prefix can overlap. E.g. consider the following case:
+	//   old = "abc"
+	//   new = "abdbc"
+	// In this case the common prefix is "ab" and the common suffix is "bc".
+	// If they overlap, just shorten the suffix so that they don't.
+	// The new suffix will be just "c".
+	if commonPrefix+commonSuffix > len(*old) {
+		commonSuffix = len(*old) - commonPrefix
+	}
+	if commonPrefix+commonSuffix > len(*new) {
+		commonSuffix = len(*new) - commonPrefix
+	}
+	return commonPrefix, len(*old) - commonSuffix, string((*new)[commonPrefix:(len(*new) - commonSuffix)])
 }
 
 // FixWarnings fixes all warnings that can be fixed automatically.
 func FixWarnings(f *build.File, pkg string, enabledWarnings []string, verbose bool) {
-	warnings := FileWarnings(f, pkg, enabledWarnings, true)
+	warnings := FileWarnings(f, pkg, enabledWarnings, nil, ModeFix)
 	if verbose {
 		fmt.Fprintf(os.Stderr, "%s: applied fixes, %d warnings left\n",
 			f.DisplayPath(),

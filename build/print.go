@@ -176,7 +176,17 @@ func (p *printer) nestedStatements(stmts []Expr) {
 	p.level--
 }
 
-func (p *printer) statements(stmts []Expr) {
+func (p *printer) statements(rawStmts []Expr) {
+	// rawStmts may contain nils if a refactoring tool replaces an actual statement with nil.
+	// It means the statements don't exist anymore, just ignore them.
+
+	stmts := []Expr{}
+	for _, stmt := range rawStmts {
+		if stmt != nil {
+			stmts = append(stmts, stmt)
+		}
+	}
+
 	for i, stmt := range stmts {
 		switch stmt := stmt.(type) {
 		case *CommentBlock:
@@ -299,6 +309,10 @@ const (
 	precOr
 	precAnd
 	precCmp
+	precBitwiseOr
+	precBitwiseXor
+	precBitwiseAnd
+	precBitwiseShift
 	precAdd
 	precMultiply
 	precUnary
@@ -323,7 +337,11 @@ var opPrec = map[string]int{
 	"/":      precMultiply,
 	"//":     precMultiply,
 	"%":      precMultiply,
-	"|":      precMultiply,
+	"|":      precBitwiseOr,
+	"&":      precBitwiseAnd,
+	"^":      precBitwiseXor,
+	"<<":     precBitwiseShift,
+	">>":     precBitwiseShift,
 }
 
 // expr prints the expression v to the print buffer.
@@ -394,7 +412,7 @@ func (p *printer) expr(v Expr, outerPrec int) {
 		// If the Token is a correct quoting of Value and has double quotes, use it,
 		// also use it if it has single quotes and the value itself contains a double quote symbol.
 		// This preserves the specific escaping choices that BUILD authors have made.
-		s, triple, err := unquote(v.Token)
+		s, triple, err := Unquote(v.Token)
 		if s == v.Value && triple == v.TripleQuote && err == nil {
 			if strings.HasPrefix(v.Token, `"`) || strings.ContainsRune(v.Value, '"') {
 				p.printf("%s", v.Token)
@@ -456,7 +474,11 @@ func (p *printer) expr(v Expr, outerPrec int) {
 		} else {
 			p.printf("%s", v.Op)
 		}
-		p.expr(v.X, precUnary)
+		// Use the next precedence level (precSuffix), so that nested unary expressions are parenthesized,
+		// for example: `not (-(+(~foo)))` instead of `not -+~foo`
+		if v.X != nil {
+			p.expr(v.X, precSuffix)
+		}
 
 	case *LambdaExpr:
 		addParen(precColon)
@@ -629,13 +651,18 @@ func (p *printer) expr(v Expr, outerPrec int) {
 
 			// If the else-block contains just one statement which is an IfStmt, flatten it as a part
 			// of if-elif chain.
-			// Don't do it if the "else" statement has a suffix comment.
-			if len(block.ElsePos.Comment().Suffix) == 0 && len(block.False) == 1 {
-				next, ok := block.False[0].(*IfStmt)
-				if ok {
-					block = next
-					continue
-				}
+			// Don't do it if the "else" statement has a suffix comment or if the next "if" statement
+			// has a before-comment.
+			if len(block.False) != 1 {
+				break
+			}
+			next, ok := block.False[0].(*IfStmt)
+			if !ok {
+				break
+			}
+			if len(block.ElsePos.Comment().Suffix) == 0 && len(next.Comment().Before) == 0 {
+				block = next
+				continue
 			}
 			break
 		}
@@ -692,7 +719,7 @@ func (p *printer) useCompactMode(start *Position, list *[]Expr, end *End, mode s
 	// If there are line comments, use multiline
 	// so we can print the comments before the closing bracket.
 	for _, x := range *list {
-		if len(x.Comment().Before) > 0 {
+		if len(x.Comment().Before) > 0 || (len(x.Comment().Suffix) > 0 && mode != modeDef) {
 			return false
 		}
 	}
@@ -712,10 +739,13 @@ func (p *printer) useCompactMode(start *Position, list *[]Expr, end *End, mode s
 		// If every element (including the brackets) ends on the same line where the next element starts,
 		// use the compact mode, otherwise use multiline mode.
 		// If an node's line number is 0, it means it doesn't appear in the original file,
-		// its position shouldn't be taken into account.
+		// its position shouldn't be taken into account. Unless a sequence is new,
+		// then use multiline mode if ForceMultiLine mode was set.
 		previousEnd := start
+		isNewSeq := start.Line == 0
 		for _, x := range *list {
 			start, end := x.Span()
+			isNewSeq = isNewSeq && start.Line == 0
 			if isDifferentLines(&start, previousEnd) {
 				return false
 			}
@@ -723,10 +753,17 @@ func (p *printer) useCompactMode(start *Position, list *[]Expr, end *End, mode s
 				previousEnd = &end
 			}
 		}
-		if end != nil && isDifferentLines(previousEnd, &end.Pos) {
-			return false
+		if end != nil {
+			isNewSeq = isNewSeq && end.Pos.Line == 0
+			if isDifferentLines(previousEnd, &end.Pos) {
+				return false
+			}
 		}
-		return true
+		if !isNewSeq {
+			return true
+		}
+		// Use the forceMultiline value for new sequences.
+		return !forceMultiLine
 	}
 	// In Build mode, use the forceMultiline and forceCompact values
 	if forceMultiLine {

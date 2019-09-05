@@ -253,10 +253,14 @@ def bar():
 def bar():
     """A docstring"""
     foo
+    """ Not a docstring"""
     return foo
 `,
-		[]string{":7:", ":11:"},
-		scopeEverywhere)
+		[]string{
+			":7: Expression result is not used. Docstrings should be the first statements of a file or a function (they may follow comment lines).",
+			":11: Expression result is not used.",
+			":12: Expression result is not used. Docstrings should be the first statements of a file or a function (they may follow comment lines).",
+		}, scopeEverywhere)
 
 	checkFindings(t, "no-effect", `
 foo == bar
@@ -363,12 +367,12 @@ load(":bar.bzl", "s1")
 foo(name = s1)`,
 		[]string{
 			":1: Loaded symbol \"s2\" is unused.",
-			":2: Symbol \"s1\" has already been loaded.",
+			":2: Symbol \"s1\" has already been loaded on line 1.",
 		},
 		scopeEverywhere)
 
 	checkFindingsAndFix(t, "load", `
-load("foo", "a", "b", "c")
+load("foo", "b", "a", "c")
 load("foo", "a", "d", "e")
 
 z = a + b + d`, `
@@ -378,7 +382,7 @@ load("foo", "d")
 z = a + b + d`,
 		[]string{
 			":1: Loaded symbol \"c\" is unused.",
-			":2: Symbol \"a\" has already been loaded.",
+			":2: Symbol \"a\" has already been loaded on line 1.",
 			":2: Loaded symbol \"e\" is unused.",
 		},
 		scopeEverywhere)
@@ -413,12 +417,12 @@ a(6)
 
 a(7)`,
 		[]string{
-			":3: Symbol \"a\" has already been loaded.",
-			":5: Symbol \"a\" has already been loaded.",
-			":7: Symbol \"a\" has already been loaded.",
-			":9: Symbol \"a\" has already been loaded.",
-			":11: Symbol \"a\" has already been loaded.",
-			":13: Symbol \"a\" has already been loaded.",
+			":3: Symbol \"a\" has already been loaded on line 1.",
+			":5: Symbol \"a\" has already been loaded on line 3.",
+			":7: Symbol \"a\" has already been loaded on line 5.",
+			":9: Symbol \"a\" has already been loaded on line 7.",
+			":11: Symbol \"a\" has already been loaded on line 9.",
+			":13: Symbol \"a\" has already been loaded on line 11.",
 		},
 		scopeEverywhere)
 

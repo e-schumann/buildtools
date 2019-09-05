@@ -107,9 +107,12 @@ func ParseDefault(filename string, data []byte) (*File, error) {
 
 func getFileType(filename string) FileType {
 	if filename == "" { // stdin
-		return TypeBuild // For compatibility
+		return TypeDefault
 	}
 	basename := strings.ToLower(filepath.Base(filename))
+	if strings.HasSuffix(basename, ".oss") {
+		basename = basename[:len(basename)-4]
+	}
 	ext := filepath.Ext(basename)
 	switch ext {
 	case ".bzl":
@@ -465,17 +468,35 @@ func (in *input) Lex(val *yySymType) int {
 		in.readRune()
 		return c
 
-	case '<', '>', '=', '!', '+', '-', '*', '/', '%', '|': // possibly followed by =
+	case '<', '>', '=', '!', '+', '-', '*', '/', '%', '|', '&', '~', '^': // possibly followed by =
 		in.readRune()
+
+		if c == '~' {
+			// unary bitwise not, shouldn't be followed by anything
+			return c
+		}
+
 		if c == '*' && in.peekRune() == '*' {
 			// double asterisk
 			in.readRune()
 			return _STAR_STAR
 		}
 
-		if c == '/' && in.peekRune() == '/' {
-			// integer division
-			in.readRune()
+		if c == in.peekRune() {
+			switch c {
+			case '/':
+				// integer division
+				in.readRune()
+				c = _INT_DIV
+			case '<':
+				// left shift
+				in.readRune()
+				c = _BIT_LSH
+			case '>':
+				// right shift
+				in.readRune()
+				c = _BIT_RSH
+			}
 		}
 
 		if in.peekRune() == '=' {
@@ -552,7 +573,7 @@ func (in *input) Lex(val *yySymType) int {
 			}
 		}
 		in.endToken(val)
-		s, triple, err := unquote(val.tok)
+		s, triple, err := Unquote(val.tok)
 		if err != nil {
 			in.Error(fmt.Sprint(err))
 		}
@@ -589,12 +610,10 @@ func (in *input) Lex(val *yySymType) int {
 	case "continue":
 		return _CONTINUE
 	}
-	for _, c := range val.tok {
-		if c > '9' || c < '0' {
-			return _IDENT
-		}
+	if len(val.tok) > 0 && val.tok[0] >= '0' && val.tok[0] <= '9' {
+		return _NUMBER
 	}
-	return _NUMBER
+	return _IDENT
 }
 
 // isIdent reports whether c is an identifier rune.

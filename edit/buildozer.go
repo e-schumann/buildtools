@@ -82,12 +82,13 @@ func cmdAdd(opts *Options, env CmdEnvironment) (*build.File, error) {
 	attr := env.Args[0]
 	for _, val := range env.Args[1:] {
 		if IsIntList(attr) {
-			AddValueToListAttribute(env.Rule, attr, env.Pkg, &build.Ident{Name: val}, &env.Vars)
+			AddValueToListAttribute(env.Rule, attr, env.Pkg, &build.LiteralExpr{Token: val}, &env.Vars)
 			continue
 		}
-		strVal := &build.StringExpr{Value: ShortenLabel(val, env.Pkg)}
+		strVal := getStringExpr(val, env.Pkg)
 		AddValueToListAttribute(env.Rule, attr, env.Pkg, strVal, &env.Vars)
 	}
+	ResolveAttr(env.Rule, attr, env.Pkg)
 	return env.File, nil
 }
 
@@ -340,12 +341,45 @@ func cmdRemove(opts *Options, env CmdEnvironment) (*build.File, error) {
 				ListAttributeDelete(env.Rule, key, val, env.Pkg)
 				fixed = true
 			}
+			ResolveAttr(env.Rule, key, env.Pkg)
 		}
 		if fixed {
 			return env.File, nil
 		}
 	}
 	return nil, nil
+}
+
+func cmdRemoveComment(opts *Options, env CmdEnvironment) (*build.File, error) {
+	switch len(env.Args) {
+	case 0: // Remove comment attached to rule
+		env.Rule.Call.Comments.Before = nil
+		env.Rule.Call.Comments.Suffix = nil
+		env.Rule.Call.Comments.After = nil
+	case 1: // Remove comment attached to attr
+		if attr := env.Rule.AttrDefn(env.Args[0]); attr != nil {
+			attr.Comments.Before = nil
+			attr.Comments.Suffix = nil
+			attr.Comments.After = nil
+			attr.LHS.Comment().Before = nil
+			attr.LHS.Comment().Suffix = nil
+			attr.LHS.Comment().After = nil
+			attr.RHS.Comment().Before = nil
+			attr.RHS.Comment().Suffix = nil
+			attr.RHS.Comment().After = nil
+		}
+	case 2: // Remove comment attached to value
+		if attr := env.Rule.Attr(env.Args[0]); attr != nil {
+			if expr := ListFind(attr, env.Args[1], env.Pkg); expr != nil {
+				expr.Comments.Before = nil
+				expr.Comments.Suffix = nil
+				expr.Comments.After = nil
+			}
+		}
+	default:
+		panic("cmdRemoveComment")
+	}
+	return env.File, nil
 }
 
 func cmdRename(opts *Options, env CmdEnvironment) (*build.File, error) {
@@ -423,20 +457,31 @@ func getAttrValueExpr(attr string, args []string, env CmdEnvironment) build.Expr
 	case IsIntList(attr):
 		var list []build.Expr
 		for _, i := range args {
-			list = append(list, &build.Ident{Name: i})
+			list = append(list, &build.LiteralExpr{Token: i})
 		}
 		return &build.ListExpr{List: list}
 	case IsList(attr) && !(len(args) == 1 && strings.HasPrefix(args[0], "glob(")):
 		var list []build.Expr
-		for _, i := range args {
-			list = append(list, &build.StringExpr{Value: ShortenLabel(i, env.Pkg)})
+		for _, arg := range args {
+			list = append(list, getStringExpr(arg, env.Pkg))
 		}
 		return &build.ListExpr{List: list}
+	case len(args) == 0:
+		// Expected a non-list argument, nothing provided
+		return &build.Ident{Name: "None"}
 	case IsString(attr):
-		return &build.StringExpr{Value: ShortenLabel(args[0], env.Pkg)}
+		return getStringExpr(args[0], env.Pkg)
 	default:
 		return &build.Ident{Name: args[0]}
 	}
+}
+
+func getStringExpr(value, pkg string) build.Expr {
+	unquoted, triple, err := build.Unquote(value)
+	if err == nil {
+		return &build.StringExpr{Value: ShortenLabel(unquoted, pkg), TripleQuote: triple}
+	}
+	return &build.StringExpr{Value: ShortenLabel(value, pkg)}
 }
 
 func cmdCopy(opts *Options, env CmdEnvironment) (*build.File, error) {
@@ -470,16 +515,12 @@ func cmdDictAdd(opts *Options, env CmdEnvironment) (*build.File, error) {
 
 	for _, x := range args {
 		kv := strings.Split(x, ":")
-		expr := build.StringExpr{
-			Value:       kv[1],
-			TripleQuote: false,
-			Token:       "",
-		}
+		expr := getStringExpr(kv[1], env.Pkg)
 
 		prev := DictionaryGet(dict, kv[0])
 		if prev == nil {
 			// Only set the value if the value is currently unset.
-			DictionarySet(dict, kv[0], &expr)
+			DictionarySet(dict, kv[0], expr)
 		}
 	}
 	env.Rule.SetAttr(attr, dict)
@@ -499,13 +540,9 @@ func cmdDictSet(opts *Options, env CmdEnvironment) (*build.File, error) {
 
 	for _, x := range args {
 		kv := strings.Split(x, ":")
-		expr := build.StringExpr{
-			Value:       kv[1],
-			TripleQuote: false,
-			Token:       "",
-		}
+		expr := getStringExpr(kv[1], env.Pkg)
 		// Set overwrites previous values.
-		DictionarySet(dict, kv[0], &expr)
+		DictionarySet(dict, kv[0], expr)
 	}
 	env.Rule.SetAttr(attr, dict)
 	return env.File, nil
@@ -586,11 +623,12 @@ var AllCommands = map[string]CommandInfo{
 	"new":               {cmdNew, false, 2, 4, "<rule_kind> <rule_name> [(before|after) <relative_rule_name>]"},
 	"print":             {cmdPrint, true, 0, -1, "<attribute(s)>"},
 	"remove":            {cmdRemove, true, 1, -1, "<attr> <value(s)>"},
+	"remove_comment":    {cmdRemoveComment, true, 0, 2, "<attr>? <value>?"},
 	"rename":            {cmdRename, true, 2, 2, "<old_attr> <new_attr>"},
 	"replace":           {cmdReplace, true, 3, 3, "<attr> <old_value> <new_value>"},
 	"substitute":        {cmdSubstitute, true, 3, 3, "<attr> <old_regexp> <new_template>"},
-	"set":               {cmdSet, true, 2, -1, "<attr> <value(s)>"},
-	"set_if_absent":     {cmdSetIfAbsent, true, 2, -1, "<attr> <value(s)>"},
+	"set":               {cmdSet, true, 1, -1, "<attr> <value(s)>"},
+	"set_if_absent":     {cmdSetIfAbsent, true, 1, -1, "<attr> <value(s)>"},
 	"copy":              {cmdCopy, true, 2, 2, "<attr> <from_rule>"},
 	"copy_no_overwrite": {cmdCopyNoOverwrite, true, 2, 2, "<attr> <from_rule>"},
 	"dict_add":          {cmdDictAdd, true, 2, -1, "<attr> <(key:value)(s)>"},
@@ -657,6 +695,7 @@ func checkCommandUsage(name string, cmd CommandInfo, count int) {
 			name, cmd.MaxArg)
 	}
 	Usage()
+	os.Exit(1)
 }
 
 // Match text that only contains spaces if they're escaped with '\'.
@@ -977,17 +1016,28 @@ func appendCommandsFromFile(opts *Options, commandsByFile map[string][]commandsF
 		reader = rc
 		defer rc.Close()
 	}
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		line := scanner.Text()
+	appendCommandsFromReader(opts, reader, commandsByFile)
+}
+
+func appendCommandsFromReader(opts *Options, reader io.Reader, commandsByFile map[string][]commandsForTarget) {
+	r := bufio.NewReader(reader)
+	atEof := false
+	for !atEof {
+		line, err := r.ReadString('\n')
+		if err == io.EOF {
+			atEof = true
+			err = nil
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error while reading commands file: %v", err)
+			return
+		}
+		line = strings.TrimSuffix(line, "\n")
 		if line == "" {
 			continue
 		}
 		args := strings.Split(line, "|")
 		appendCommands(opts, commandsByFile, args)
-	}
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error while reading commands file: %v", scanner.Err())
 	}
 }
 

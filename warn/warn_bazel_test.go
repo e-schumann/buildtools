@@ -12,8 +12,8 @@ cc_library(srcs =
     "test.cpp",
   ])
 )`,
-		[]string{":1: Glob pattern `foo.cc` has no wildcard",
-			":6: Glob pattern `test.cpp` has no wildcard"},
+		[]string{`:1: Glob pattern "foo.cc" has no wildcard`,
+			`:6: Glob pattern "test.cpp" has no wildcard`},
 		scopeBazel)
 }
 
@@ -65,8 +65,13 @@ exports_files(["foo.txt"])
 func TestPositionalArguments(t *testing.T) {
 	checkFindings(t, "positional-args", `
 my_macro(foo = "bar")
-my_macro("foo", "bar")`,
-		[]string{":2: All calls to rules or macros should pass arguments by keyword (arg_name=value) syntax."},
+my_macro("foo", "bar")
+my_macro(foo = bar(x))
+[my_macro(foo) for foo in bar]`,
+		[]string{
+			":2: All calls to rules or macros should pass arguments by keyword (arg_name=value) syntax.",
+			":4: All calls to rules or macros should pass arguments by keyword (arg_name=value) syntax.",
+		},
 		scopeBuild|scopeWorkspace)
 
 	checkFindings(t, "positional-args", `
@@ -76,4 +81,51 @@ register_toolchains(
 )`,
 		[]string{},
 		scopeBuild|scopeWorkspace)
+}
+
+func TestKwargsInBuildFilesWarning(t *testing.T) {
+	checkFindings(t, "build-args-kwargs", `
+cc_library(
+  name = "foo",
+  *args,
+  **kwargs,
+)
+
+foo(*bar(**kgs))`,
+		[]string{
+			":3: *args are not allowed in BUILD files.",
+			":4: **kwargs are not allowed in BUILD files.",
+			":7: *args are not allowed in BUILD files.",
+			":7: **kwargs are not allowed in BUILD files.",
+		},
+		scopeBuild)
+
+	checkFindings(t, "build-args-kwargs", `
+cc_library(
+  name = "foo",
+  -args,
+)
+
+foo(not bar(-kgs))`,
+		[]string{},
+		scopeBuild)
+}
+
+func TestPrintWarning(t *testing.T) {
+	checkFindings(t, "print", `
+foo()
+
+print("foo")
+
+def f(x):
+  print(x)
+
+  g(x) or print("not g")
+`,
+		[]string{
+			`:3: "print()" is a debug function and shouldn't be submitted.`,
+			`:6: "print()" is a debug function and shouldn't be submitted.`,
+			`:8: "print()" is a debug function and shouldn't be submitted.`,
+		},
+		scopeBazel)
 }
